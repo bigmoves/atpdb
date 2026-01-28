@@ -16,6 +16,7 @@ pub enum QueryError {
 pub enum Query {
     Exact(AtUri),
     Collection { did: Did, collection: Nsid },
+    AllCollection { collection: Nsid },
 }
 
 impl Query {
@@ -35,9 +36,21 @@ impl Query {
             ));
         }
 
-        let did: Did = parts[0].parse()?;
+        let did_str = parts[0];
         let collection: Nsid = parts[1].parse()?;
         let rkey = parts[2];
+
+        // Handle wildcard DID: at://*/collection/*
+        if did_str == "*" {
+            if rkey != "*" {
+                return Err(QueryError::Invalid(
+                    "wildcard DID requires wildcard rkey (at://*/collection/*)".to_string(),
+                ));
+            }
+            return Ok(Query::AllCollection { collection });
+        }
+
+        let did: Did = did_str.parse()?;
 
         if rkey == "*" {
             Ok(Query::Collection { did, collection })
@@ -49,12 +62,28 @@ impl Query {
 }
 
 pub fn execute(query: &Query, store: &Store) -> Result<Vec<Record>, QueryError> {
+    execute_paginated(query, store, None, usize::MAX)
+}
+
+pub fn execute_paginated(
+    query: &Query,
+    store: &Store,
+    cursor: Option<&str>,
+    limit: usize,
+) -> Result<Vec<Record>, QueryError> {
     match query {
         Query::Exact(uri) => match store.get(uri)? {
             Some(record) => Ok(vec![record]),
             None => Ok(vec![]),
         },
-        Query::Collection { did, collection } => Ok(store.scan_collection(did, collection)?),
+        Query::Collection { did, collection } => {
+            // For collection query, cursor is just the rkey
+            Ok(store.scan_collection_paginated(did, collection, cursor, limit)?)
+        }
+        Query::AllCollection { collection } => {
+            // For all collection query, cursor is the full URI
+            Ok(store.scan_all_collection_paginated(collection, cursor, limit)?)
+        }
     }
 }
 
@@ -83,6 +112,22 @@ mod tests {
             }
             _ => panic!("expected Collection"),
         }
+    }
+
+    #[test]
+    fn test_parse_all_collection() {
+        let q = Query::parse("at://*/app.bsky.feed.post/*").unwrap();
+        match q {
+            Query::AllCollection { collection } => {
+                assert_eq!(collection.as_str(), "app.bsky.feed.post");
+            }
+            _ => panic!("expected AllCollection"),
+        }
+    }
+
+    #[test]
+    fn test_parse_wildcard_did_requires_wildcard_rkey() {
+        assert!(Query::parse("at://*/app.bsky.feed.post/specific-rkey").is_err());
     }
 
     #[test]

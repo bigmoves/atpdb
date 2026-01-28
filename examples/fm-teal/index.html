@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>fm.teal Feed</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #14b8a6;
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 0.875rem;
+            margin-bottom: 24px;
+        }
+        .query-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 24px;
+            font-family: monospace;
+            font-size: 0.875rem;
+            color: #14b8a6;
+        }
+        .stats {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 24px;
+            font-size: 0.875rem;
+            color: #888;
+        }
+        .feed {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .play-card {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 16px;
+            transition: border-color 0.2s;
+        }
+        .play-card:hover {
+            border-color: #14b8a6;
+        }
+        .play-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #14b8a6, #0d9488);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 1rem;
+            object-fit: cover;
+        }
+        .display-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        .did {
+            font-size: 0.75rem;
+            color: #666;
+            font-family: monospace;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .track-info {
+            background: #0d0d0d;
+            border-radius: 8px;
+            padding: 12px;
+        }
+        .track-name {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        .track-artist {
+            color: #888;
+            font-size: 0.875rem;
+        }
+        .track-album {
+            color: #666;
+            font-size: 0.75rem;
+            margin-top: 4px;
+        }
+        .timestamp {
+            font-size: 0.75rem;
+            color: #555;
+            margin-top: 12px;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        .error {
+            background: #2d1515;
+            border: 1px solid #5c2020;
+            border-radius: 8px;
+            padding: 16px;
+            color: #f87171;
+        }
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        button {
+            background: #14b8a6;
+            color: #000;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        button:hover {
+            background: #0d9488;
+        }
+        button:disabled {
+            background: #333;
+            color: #666;
+            cursor: not-allowed;
+        }
+        input {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            color: #e0e0e0;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-family: monospace;
+            flex: 1;
+        }
+        input:focus {
+            outline: none;
+            border-color: #14b8a6;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>fm.teal Feed</h1>
+        <p class="subtitle">Powered by atpdb</p>
+
+        <div class="controls">
+            <input type="text" id="api-url" value="http://localhost:3000" placeholder="API URL">
+            <button onclick="loadFeed()">Refresh</button>
+        </div>
+
+        <div class="query-box" id="query-display">
+            at://*/fm.teal.alpha.feed.play/*
+        </div>
+
+        <div class="stats" id="stats">
+            <span id="record-count">Loading...</span>
+            <span id="query-time"></span>
+        </div>
+
+        <div class="feed" id="feed">
+            <div class="loading">Connecting to atpdb...</div>
+        </div>
+
+        <div id="load-more-container" style="text-align: center; margin-top: 16px; display: none;">
+            <button id="load-more-btn" onclick="loadMore()">Load More</button>
+        </div>
+    </div>
+
+    <script>
+        // Pagination state
+        let currentCursor = null;
+        let allRecords = [];
+        let totalCount = null;
+        const PAGE_SIZE = 50;
+
+        function truncateDid(did) {
+            if (did.length > 30) {
+                return did.slice(0, 20) + '...' + did.slice(-8);
+            }
+            return did;
+        }
+
+        function getInitials(did) {
+            const parts = did.split(':');
+            if (parts.length >= 3) {
+                return parts[2].slice(0, 2).toUpperCase();
+            }
+            return '??';
+        }
+
+        function formatTime(timestamp) {
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleString();
+        }
+
+        function extractDidFromUri(uri) {
+            const match = uri.match(/at:\/\/([^/]+)/);
+            return match ? match[1] : 'unknown';
+        }
+
+        function renderPlay(record) {
+            const did = extractDidFromUri(record.uri);
+            const value = record.value;
+            const author = record.author;
+
+            // fm.teal.alpha.feed.play structure
+            const trackName = value.trackName || 'Unknown Track';
+            const artistName = value.artists?.map(a => a.artistName).join(', ') || 'Unknown Artist';
+            const albumName = value.releaseName || '';
+
+            // Use hydrated profile data
+            const displayName = author?.value?.displayName || truncateDid(did);
+            const avatarUrl = author?.value?.avatar?.url;
+
+            const avatarHtml = avatarUrl
+                ? `<img src="${avatarUrl}" class="avatar" alt="${escapeHtml(displayName)}">`
+                : `<div class="avatar">${getInitials(did)}</div>`;
+
+            return `
+                <div class="play-card">
+                    <div class="play-header">
+                        ${avatarHtml}
+                        <div>
+                            <div class="display-name">${escapeHtml(displayName)}</div>
+                            <div class="did">${truncateDid(did)}</div>
+                        </div>
+                    </div>
+                    <div class="track-info">
+                        <div class="track-name">${escapeHtml(trackName)}</div>
+                        <div class="track-artist">${escapeHtml(artistName)}</div>
+                        ${albumName ? `<div class="track-album">${escapeHtml(albumName)}</div>` : ''}
+                    </div>
+                    <div class="timestamp">${value.playedTime ? new Date(value.playedTime).toLocaleString() : formatTime(record.indexedAt)}</div>
+                </div>
+            `;
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        async function loadFeed() {
+            // Reset state
+            currentCursor = null;
+            allRecords = [];
+            totalCount = null;
+
+            const feedEl = document.getElementById('feed');
+            const statsEl = document.getElementById('record-count');
+            const timeEl = document.getElementById('query-time');
+            const loadMoreContainer = document.getElementById('load-more-container');
+
+            feedEl.innerHTML = '<div class="loading">Loading...</div>';
+            loadMoreContainer.style.display = 'none';
+
+            await fetchPage(true);
+        }
+
+        async function loadMore() {
+            const btn = document.getElementById('load-more-btn');
+            btn.disabled = true;
+            btn.textContent = 'Loading...';
+            await fetchPage(false);
+            btn.disabled = false;
+            btn.textContent = 'Load More';
+        }
+
+        async function fetchPage(isFirstPage) {
+            const feedEl = document.getElementById('feed');
+            const statsEl = document.getElementById('record-count');
+            const timeEl = document.getElementById('query-time');
+            const loadMoreContainer = document.getElementById('load-more-container');
+            const apiUrl = document.getElementById('api-url').value;
+
+            const startTime = performance.now();
+
+            try {
+                const body = {
+                    q: 'at://*/fm.teal.alpha.feed.play/*',
+                    limit: PAGE_SIZE,
+                    sort: 'value.playedTime:datetime:desc',
+                    hydrate: {
+                        author: 'at://$.did/app.bsky.actor.profile/self'
+                    },
+                    blobs: {
+                        'author.value.avatar': 'avatar'
+                    },
+                    include_count: isFirstPage  // Only fetch count on first page
+                };
+                // Include cursor for pagination (now works with sorting via indexes)
+                if (currentCursor) {
+                    body.cursor = currentCursor;
+                }
+
+                const response = await fetch(`${apiUrl}/query`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                const endTime = performance.now();
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Query failed');
+                }
+
+                const data = await response.json();
+
+                // Update cursor for next page
+                currentCursor = data.cursor;
+
+                // Store total count from first page
+                if (data.total !== undefined) {
+                    totalCount = data.total;
+                }
+
+                // Add new records (server already returns them sorted)
+                allRecords = allRecords.concat(data.records);
+
+                const hasMore = data.cursor !== null;
+                if (totalCount !== null) {
+                    statsEl.textContent = `${totalCount.toLocaleString()} plays total`;
+                } else {
+                    statsEl.textContent = `${allRecords.length} records${hasMore ? '+' : ''}`;
+                }
+                timeEl.textContent = `(${(endTime - startTime).toFixed(0)}ms)`;
+
+                if (allRecords.length === 0) {
+                    feedEl.innerHTML = '<div class="loading">No fm.teal plays found. Connect to firehose and wait for some plays!</div>';
+                    loadMoreContainer.style.display = 'none';
+                    return;
+                }
+
+                // Server returns records sorted, so just render them
+                feedEl.innerHTML = allRecords.map(renderPlay).join('');
+
+                // Show/hide load more button
+                loadMoreContainer.style.display = hasMore ? 'block' : 'none';
+
+            } catch (err) {
+                if (isFirstPage) {
+                    feedEl.innerHTML = `<div class="error">
+                        <strong>Error:</strong> ${escapeHtml(err.message)}<br><br>
+                        Make sure atpdb is running with: <code>cargo run -- serve</code><br>
+                        For sorted queries, add index: <code>ATPDB_INDEXES=fm.teal.alpha.feed.play:playedTime:datetime</code>
+                    </div>`;
+                }
+                statsEl.textContent = 'Error';
+                timeEl.textContent = '';
+                loadMoreContainer.style.display = 'none';
+            }
+        }
+
+        // Load on page load
+        loadFeed();
+    </script>
+</body>
+</html>

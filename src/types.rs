@@ -107,11 +107,6 @@ pub struct AtUri {
     pub rkey: Rkey,
 }
 
-impl AtUri {
-    pub fn to_storage_key(&self) -> Vec<u8> {
-        self.to_string().into_bytes()
-    }
-}
 
 impl FromStr for AtUri {
     type Err = ParseError;
@@ -207,10 +202,4 @@ mod tests {
         assert_eq!(uri.to_string(), original);
     }
 
-    #[test]
-    fn test_aturi_storage_key() {
-        let uri: AtUri = "at://did:plc:xyz/app.bsky.feed.post/abc".parse().unwrap();
-        let key = uri.to_storage_key();
-        assert_eq!(key, b"at://did:plc:xyz/app.bsky.feed.post/abc");
-    }
 }

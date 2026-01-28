@@ -1,8 +1,23 @@
+use crate::cbor::dagcbor_to_json;
 use crate::types::{AtUri, Did};
 use serde::Deserialize;
 use std::io::Cursor;
 use thiserror::Error;
 use tungstenite::{connect, Message};
+
+/// Convert HTTP/HTTPS URL to WebSocket URL
+fn to_websocket_url(url: &str) -> String {
+    if url.starts_with("https://") {
+        format!("wss://{}", &url[8..])
+    } else if url.starts_with("http://") {
+        format!("ws://{}", &url[7..])
+    } else if url.starts_with("wss://") || url.starts_with("ws://") {
+        url.to_string()
+    } else {
+        // Assume https if no scheme
+        format!("wss://{}", url)
+    }
+}
 
 #[derive(Error, Debug)]
 pub enum FirehoseError {
@@ -17,8 +32,8 @@ pub enum FirehoseError {
 #[derive(Debug)]
 pub enum Event {
     Commit {
-        #[allow(dead_code)]
         did: Did,
+        rev: String,
         operations: Vec<Operation>,
     },
     Unknown,
@@ -45,6 +60,7 @@ struct Header {
 #[derive(Debug, Deserialize)]
 struct CommitBody {
     repo: String,
+    rev: String,
     ops: Vec<RepoOp>,
     #[serde(with = "serde_bytes")]
     blocks: Vec<u8>,
@@ -93,7 +109,8 @@ pub struct FirehoseClient {
 
 impl FirehoseClient {
     pub fn connect(relay: &str) -> Result<Self, FirehoseError> {
-        let url = format!("wss://{}/xrpc/com.atproto.sync.subscribeRepos", relay);
+        let base = to_websocket_url(relay);
+        let url = format!("{}/xrpc/com.atproto.sync.subscribeRepos", base.trim_end_matches('/'));
         let (socket, _response) = connect(&url).map_err(Box::new)?;
         Ok(FirehoseClient { socket })
     }
@@ -167,7 +184,11 @@ impl FirehoseClient {
             }
         }
 
-        Ok(Some(Event::Commit { did, operations }))
+        Ok(Some(Event::Commit {
+            did,
+            rev: body.rev,
+            operations,
+        }))
     }
 
     fn parse_car_blocks(
@@ -227,8 +248,8 @@ impl FirehoseClient {
             let block_data = &car_bytes[data_start..data_end];
             cursor.set_position(data_end as u64);
 
-            // Try to decode as dag-cbor and convert to JSON
-            if let Ok(value) = serde_ipld_dagcbor::from_slice::<serde_json::Value>(block_data) {
+            // Decode dag-cbor to JSON with proper CID link handling
+            if let Ok(value) = dagcbor_to_json(block_data) {
                 blocks.insert(cid, value);
             }
         }

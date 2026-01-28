@@ -1,11 +1,22 @@
+mod app;
+mod cbor;
+mod config;
+mod crawler;
 mod firehose;
 mod indexer;
 mod query;
+mod repos;
+mod server;
 mod storage;
+mod sync;
+mod sync_worker;
 mod types;
 
+use app::AppState;
+use config::Mode;
 use firehose::{Event, FirehoseClient, Operation};
 use query::Query;
+use repos::RepoState;
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::path::Path;
@@ -22,7 +33,7 @@ enum CommandResult {
 
 fn handle_command(
     line: &str,
-    store: &Arc<storage::Store>,
+    app: &Arc<AppState>,
     running: &Arc<AtomicBool>,
 ) -> CommandResult {
     match line {
@@ -35,24 +46,73 @@ fn handle_command(
             println!("  .stats            Show statistics");
             println!("  .dids             List unique DIDs");
             println!("  .collections      List unique collections");
-            println!("  .quit             Exit");
+            println!();
+            println!("Repo management:");
+            println!("  .repos                    List tracked repos");
+            println!("  .repos add <did> [...]    Add repos to track");
+            println!("  .repos remove <did>       Remove tracked repo");
+            println!("  .repos status <did>       Show repo status");
+            println!("  .repos errors             List errored repos");
+            println!("  .repos resync <did>       Force resync");
+            println!("  .repos resync --errors    Resync all errored");
+            println!();
+            println!("Config:");
+            println!("  .config                   Show current config");
+            println!("  .config mode <mode>       Set mode (manual|signal|full-network)");
+            println!("  .config signal <nsid>     Set signal collection");
+            println!("  .config collections <..>  Set collection filters");
+            println!("  .config relay <hostname>  Set relay hostname");
+            println!("  .config indexes <...>     Set indexes (col:field:type,...)");
+            println!();
+            println!("Indexes:");
+            println!("  .index list               List configured indexes");
+            println!("  .index rebuild <spec>     Rebuild index (col:field:type)");
+            println!("  .index rebuild-all        Rebuild all configured indexes");
             println!();
             println!("Queries:");
             println!("  at://did/collection/rkey   Get single record");
-            println!("  at://did/collection/*      Get all records in collection");
+            println!("  at://did/collection/*      Get all records in collection for DID");
+            println!("  at://*/collection/*        Get all records in collection (all DIDs)");
+            println!("  at://did?sync              Sync a user's repo from their PDS");
+            println!();
+            println!("  .quit             Exit");
             CommandResult::Continue
         }
 
         ".stats" => {
-            match store.count() {
+            match app.store.count() {
                 Ok(count) => println!("Records: {}", count),
                 Err(e) => println!("Error: {}", e),
             }
+
+            match app.repos.list() {
+                Ok(repos) => println!("Tracked repos: {}", repos.len()),
+                Err(e) => println!("Error: {}", e),
+            }
+
+            let config = app.config();
+            println!("Mode: {}", config.mode);
+
+            match app.list_cursors() {
+                Ok(cursors) => {
+                    if cursors.is_empty() {
+                        println!("Crawler cursors: (none)");
+                    } else {
+                        println!("Crawler cursors:");
+                        for (key, value) in cursors {
+                            let display = if value.is_empty() { "(complete)" } else { &value };
+                            println!("  {}: {}", key, display);
+                        }
+                    }
+                }
+                Err(e) => println!("Error: {}", e),
+            }
+
             CommandResult::Continue
         }
 
         ".dids" => {
-            match store.unique_dids() {
+            match app.store.unique_dids() {
                 Ok(dids) => {
                     println!("Unique DIDs ({}):", dids.len());
                     for did in dids {
@@ -65,7 +125,7 @@ fn handle_command(
         }
 
         ".collections" => {
-            match store.unique_collections() {
+            match app.store.unique_collections() {
                 Ok(cols) => {
                     println!("Unique collections ({}):", cols.len());
                     for col in cols {
@@ -80,6 +140,290 @@ fn handle_command(
         ".disconnect" => {
             running.store(false, Ordering::Relaxed);
             println!("Disconnecting...");
+            CommandResult::Continue
+        }
+
+        ".config" => {
+            let config = app.config();
+            println!("Mode: {}", config.mode);
+            if let Some(signal) = &config.signal_collection {
+                println!("Signal collection: {}", signal);
+            }
+            if !config.collections.is_empty() {
+                println!("Collection filters: {}", config.collections.join(", "));
+            }
+            println!("Relay: {}", config.relay);
+            println!("Sync parallelism: {}", config.sync_parallelism);
+            CommandResult::Continue
+        }
+
+        cmd if cmd.starts_with(".config ") => {
+            let parts: Vec<&str> = cmd
+                .strip_prefix(".config ")
+                .unwrap()
+                .splitn(2, ' ')
+                .collect();
+            if parts.is_empty() {
+                println!("Usage: .config <key> <value>");
+                return CommandResult::Continue;
+            }
+
+            match parts[0] {
+                "mode" => {
+                    if parts.len() < 2 {
+                        println!("Usage: .config mode <manual|signal|full-network>");
+                        return CommandResult::Continue;
+                    }
+                    let mode = match parts[1] {
+                        "manual" => Mode::Manual,
+                        "signal" => Mode::Signal,
+                        "full-network" => Mode::FullNetwork,
+                        _ => {
+                            println!("Invalid mode. Use: manual, signal, full-network");
+                            return CommandResult::Continue;
+                        }
+                    };
+                    if let Err(e) = app.update_config(|c| c.mode = mode) {
+                        println!("Error: {}", e);
+                    } else {
+                        println!("Mode set to {}", mode);
+                    }
+                }
+                "signal" => {
+                    if parts.len() < 2 {
+                        println!("Usage: .config signal <collection>");
+                        return CommandResult::Continue;
+                    }
+                    let signal = parts[1].to_string();
+                    if let Err(e) =
+                        app.update_config(|c| c.signal_collection = Some(signal.clone()))
+                    {
+                        println!("Error: {}", e);
+                    } else {
+                        println!("Signal collection set to {}", signal);
+                    }
+                }
+                "collections" => {
+                    if parts.len() < 2 {
+                        println!("Usage: .config collections <col1,col2,...>");
+                        return CommandResult::Continue;
+                    }
+                    let collections: Vec<String> =
+                        parts[1].split(',').map(|s| s.trim().to_string()).collect();
+                    if let Err(e) = app.update_config(|c| c.collections = collections.clone()) {
+                        println!("Error: {}", e);
+                    } else {
+                        println!("Collection filters set to: {}", collections.join(", "));
+                    }
+                }
+                "relay" => {
+                    if parts.len() < 2 {
+                        println!("Usage: .config relay <hostname>");
+                        return CommandResult::Continue;
+                    }
+                    let relay = parts[1].to_string();
+                    if let Err(e) = app.update_config(|c| c.relay = relay.clone()) {
+                        println!("Error: {}", e);
+                    } else {
+                        println!("Relay set to {}", relay);
+                    }
+                }
+                "indexes" => {
+                    if parts.len() < 2 {
+                        println!("Usage: .config indexes <col:field:type,...>");
+                        return CommandResult::Continue;
+                    }
+                    let indexes: Vec<config::IndexConfig> = parts[1]
+                        .split(',')
+                        .filter_map(|s| config::IndexConfig::parse(s.trim()))
+                        .collect();
+                    if let Err(e) = app.update_config(|c| c.indexes = indexes.clone()) {
+                        println!("Error: {}", e);
+                    } else {
+                        let idx_strs: Vec<_> = indexes.iter().map(|i| i.to_config_string()).collect();
+                        println!("Indexes set to: {}", idx_strs.join(", "));
+                    }
+                }
+                _ => {
+                    println!("Unknown config key: {}", parts[0]);
+                }
+            }
+            CommandResult::Continue
+        }
+
+        cmd if cmd.starts_with(".index ") => {
+            let subcmd = cmd.strip_prefix(".index ").unwrap().trim();
+            let parts: Vec<&str> = subcmd.split_whitespace().collect();
+
+            match parts.first().copied() {
+                Some("list") => {
+                    let config = app.config();
+                    if config.indexes.is_empty() {
+                        println!("No indexes configured");
+                    } else {
+                        println!("Configured indexes:");
+                        for idx in &config.indexes {
+                            println!("  {}", idx.to_config_string());
+                        }
+                    }
+                }
+                Some("rebuild") => {
+                    if let Some(spec) = parts.get(1) {
+                        if let Some(index) = config::IndexConfig::parse(spec) {
+                            println!("Rebuilding index {}...", spec);
+                            match app.store.rebuild_index(&index) {
+                                Ok(count) => println!("Rebuilt index with {} entries", count),
+                                Err(e) => println!("Error: {}", e),
+                            }
+                        } else {
+                            println!("Invalid index spec. Format: collection:field:type");
+                            println!("Types: datetime, integer");
+                        }
+                    } else {
+                        println!("Usage: .index rebuild <collection:field:type>");
+                    }
+                }
+                Some("rebuild-all") => {
+                    let config = app.config();
+                    if config.indexes.is_empty() {
+                        println!("No indexes configured");
+                    } else {
+                        for index in &config.indexes {
+                            println!("Rebuilding {}...", index.to_config_string());
+                            match app.store.rebuild_index(index) {
+                                Ok(count) => println!("  {} entries", count),
+                                Err(e) => println!("  Error: {}", e),
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    println!("Usage:");
+                    println!("  .index list               List configured indexes");
+                    println!("  .index rebuild <spec>     Rebuild index (col:field:type)");
+                    println!("  .index rebuild-all        Rebuild all configured indexes");
+                }
+            }
+            CommandResult::Continue
+        }
+
+        ".repos" => {
+            match app.repos.list() {
+                Ok(repos) => {
+                    if repos.is_empty() {
+                        println!("No tracked repos");
+                    } else {
+                        println!("Tracked repos ({}):", repos.len());
+                        for repo in repos {
+                            println!(
+                                "  {} [{}] {} records",
+                                repo.did, repo.status, repo.record_count
+                            );
+                        }
+                    }
+                }
+                Err(e) => println!("Error: {}", e),
+            }
+            CommandResult::Continue
+        }
+
+        cmd if cmd.starts_with(".repos ") => {
+            let rest = cmd.strip_prefix(".repos ").unwrap();
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+
+            match parts.first().copied() {
+                Some("add") => {
+                    for did in &parts[1..] {
+                        let state = RepoState::new(did.to_string());
+                        match app.repos.put(&state) {
+                            Ok(()) => println!("Added {} (pending sync)", did),
+                            Err(e) => println!("Error adding {}: {}", did, e),
+                        }
+                    }
+                }
+                Some("remove") => {
+                    if parts.len() < 2 {
+                        println!("Usage: .repos remove <did>");
+                    } else {
+                        let did = parts[1];
+                        match app.repos.delete(did) {
+                            Ok(()) => println!("Removed {}", did),
+                            Err(e) => println!("Error: {}", e),
+                        }
+                    }
+                }
+                Some("status") => {
+                    if parts.len() < 2 {
+                        println!("Usage: .repos status <did>");
+                    } else {
+                        let did = parts[1];
+                        match app.repos.get(did) {
+                            Ok(Some(state)) => {
+                                println!("DID: {}", state.did);
+                                println!("Status: {}", state.status);
+                                if let Some(rev) = &state.rev {
+                                    println!("Rev: {}", rev);
+                                }
+                                println!("Records: {}", state.record_count);
+                                if let Some(ts) = state.last_sync {
+                                    println!("Last sync: {}", ts);
+                                }
+                                if let Some(err) = &state.error {
+                                    println!("Error: {}", err);
+                                    println!("Retry count: {}", state.retry_count);
+                                }
+                            }
+                            Ok(None) => println!("Repo not found"),
+                            Err(e) => println!("Error: {}", e),
+                        }
+                    }
+                }
+                Some("errors") => match app.repos.list_by_status(repos::RepoStatus::Error) {
+                    Ok(repos) => {
+                        if repos.is_empty() {
+                            println!("No errored repos");
+                        } else {
+                            println!("Errored repos ({}):", repos.len());
+                            for repo in repos {
+                                println!("  {} - {}", repo.did, repo.error.unwrap_or_default());
+                            }
+                        }
+                    }
+                    Err(e) => println!("Error: {}", e),
+                },
+                Some("resync") => {
+                    if parts.len() < 2 {
+                        println!("Usage: .repos resync <did> or .repos resync --errors");
+                    } else if parts[1] == "--errors" {
+                        match app.repos.list_by_status(repos::RepoStatus::Error) {
+                            Ok(repos) => {
+                                for mut repo in repos {
+                                    repo.status = repos::RepoStatus::Pending;
+                                    repo.error = None;
+                                    let _ = app.repos.put(&repo);
+                                    println!("Queued {} for resync", repo.did);
+                                }
+                            }
+                            Err(e) => println!("Error: {}", e),
+                        }
+                    } else {
+                        let did = parts[1];
+                        match app.repos.get(did) {
+                            Ok(Some(mut state)) => {
+                                state.status = repos::RepoStatus::Pending;
+                                state.error = None;
+                                let _ = app.repos.put(&state);
+                                println!("Queued {} for resync", did);
+                            }
+                            Ok(None) => println!("Repo not found"),
+                            Err(e) => println!("Error: {}", e),
+                        }
+                    }
+                }
+                _ => {
+                    println!("Unknown repos command. Try .repos add/remove/status/errors/resync");
+                }
+            }
             CommandResult::Continue
         }
 
@@ -99,10 +443,28 @@ fn handle_command(
         }
 
         line if line.starts_with("at://") => {
+            if line.contains("?sync") {
+                let uri_part = line.strip_prefix("at://").unwrap();
+                let did = uri_part.split('?').next().unwrap();
+
+                println!("Syncing {}...", did);
+                let start = std::time::Instant::now();
+                let store = Arc::new(app.store.clone());
+                let config = app.config();
+                match sync::sync_repo(did, &store, &config.collections, &config.indexes) {
+                    Ok(result) => {
+                        let elapsed = start.elapsed();
+                        println!("Synced {} records ({:.2?})", result.record_count, elapsed);
+                    }
+                    Err(e) => println!("Sync error: {}", e),
+                }
+                return CommandResult::Continue;
+            }
+
             match Query::parse(line) {
                 Ok(q) => {
                     let start = std::time::Instant::now();
-                    match query::execute(&q, store) {
+                    match query::execute(&q, &app.store) {
                         Ok(records) => {
                             let elapsed = start.elapsed();
                             for record in &records {
@@ -129,7 +491,7 @@ fn handle_command(
     }
 }
 
-fn start_streaming(relay: String, store: Arc<storage::Store>, running: Arc<AtomicBool>) {
+fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) {
     running.store(true, Ordering::Relaxed);
 
     thread::spawn(move || {
@@ -139,10 +501,15 @@ fn start_streaming(relay: String, store: Arc<storage::Store>, running: Arc<Atomi
 
                 while running.load(Ordering::Relaxed) {
                     match client.next_event() {
-                        Ok(Some(Event::Commit { did: _, operations })) => {
+                        Ok(Some(Event::Commit {
+                            did: _,
+                            rev: _,
+                            operations,
+                        })) => {
                             for op in operations {
                                 match op {
                                     Operation::Create { uri, cid, value } => {
+                                        let config = app.config();
                                         let record = storage::Record {
                                             uri: uri.to_string(),
                                             cid,
@@ -152,12 +519,13 @@ fn start_streaming(relay: String, store: Arc<storage::Store>, running: Arc<Atomi
                                                 .unwrap()
                                                 .as_secs(),
                                         };
-                                        if let Err(e) = store.put(&uri, &record) {
+                                        if let Err(e) = app.store.put_with_indexes(&uri, &record, &config.indexes) {
                                             eprintln!("Storage error: {}", e);
                                         }
                                     }
                                     Operation::Delete { uri } => {
-                                        if let Err(e) = store.delete(&uri) {
+                                        let config = app.config();
+                                        if let Err(e) = app.store.delete_with_indexes(&uri, &config.indexes) {
                                             eprintln!("Storage error: {}", e);
                                         }
                                     }
@@ -187,10 +555,39 @@ fn start_streaming(relay: String, store: Arc<storage::Store>, running: Arc<Atomi
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // Non-interactive mode: run command from args
+    // Check for serve subcommand
+    if args.len() > 1 && args[1] == "serve" {
+        let mut port: u16 = 3000;
+        // Check env var first, then command line can override
+        let mut relay: Option<String> = std::env::var("ATPDB_RELAY").ok();
+
+        for arg in &args[2..] {
+            if let Some(p) = arg.strip_prefix("--port=") {
+                port = p.parse().unwrap_or(3000);
+            } else if arg == "--connect" {
+                relay = Some("bsky.network".to_string());
+            } else if let Some(r) = arg.strip_prefix("--connect=") {
+                relay = Some(r.to_string());
+            }
+        }
+
+        let app = match AppState::open(Path::new("./atpdb.data")) {
+            Ok(a) => Arc::new(a),
+            Err(e) => {
+                eprintln!("Failed to open storage: {}", e);
+                return;
+            }
+        };
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(server::run(app, port, relay));
+        return;
+    }
+
+    // Non-interactive mode
     if args.len() > 1 {
-        let store = match storage::Store::open(Path::new("./atpdb.data")) {
-            Ok(s) => Arc::new(s),
+        let app = match AppState::open(Path::new("./atpdb.data")) {
+            Ok(a) => Arc::new(a),
             Err(e) => {
                 eprintln!("Failed to open storage: {}", e);
                 return;
@@ -199,7 +596,7 @@ fn main() {
         let running = Arc::new(AtomicBool::new(false));
 
         let command = args[1..].join(" ");
-        handle_command(&command, &store, &running);
+        handle_command(&command, &app, &running);
         return;
     }
 
@@ -213,8 +610,8 @@ fn main() {
 "#
     );
 
-    let store = match storage::Store::open(Path::new("./atpdb.data")) {
-        Ok(s) => Arc::new(s),
+    let app = match AppState::open(Path::new("./atpdb.data")) {
+        Ok(a) => Arc::new(a),
         Err(e) => {
             eprintln!("Failed to open storage: {}", e);
             return;
@@ -240,11 +637,11 @@ fn main() {
 
                 let _ = rl.add_history_entry(line);
 
-                match handle_command(line, &store, &running) {
+                match handle_command(line, &app, &running) {
                     CommandResult::Continue => {}
                     CommandResult::Exit => break,
                     CommandResult::StartStreaming(relay) => {
-                        start_streaming(relay, Arc::clone(&store), Arc::clone(&running));
+                        start_streaming(relay, Arc::clone(&app), Arc::clone(&running));
                     }
                 }
             }
