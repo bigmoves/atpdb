@@ -1,3 +1,4 @@
+mod query;
 mod storage;
 mod types;
 
