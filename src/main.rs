@@ -59,6 +59,8 @@ fn main() {
                         println!("  .connect <relay>  Connect to firehose (default: bsky.network)");
                         println!("  .disconnect       Stop firehose");
                         println!("  .stats            Show statistics");
+                        println!("  .dids             List unique DIDs");
+                        println!("  .collections      List unique collections");
                         println!("  .quit             Exit");
                         println!();
                         println!("Queries:");
@@ -68,6 +70,26 @@ fn main() {
 
                     ".stats" => match store.count() {
                         Ok(count) => println!("Records: {}", count),
+                        Err(e) => println!("Error: {}", e),
+                    },
+
+                    ".dids" => match store.unique_dids() {
+                        Ok(dids) => {
+                            println!("Unique DIDs ({}):", dids.len());
+                            for did in dids {
+                                println!("  {}", did);
+                            }
+                        }
+                        Err(e) => println!("Error: {}", e),
+                    },
+
+                    ".collections" => match store.unique_collections() {
+                        Ok(cols) => {
+                            println!("Unique collections ({}):", cols.len());
+                            for col in cols {
+                                println!("  {}", col);
+                            }
+                        }
                         Err(e) => println!("Error: {}", e),
                     },
 

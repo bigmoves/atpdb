@@ -77,6 +77,49 @@ impl Store {
     pub fn count(&self) -> Result<usize, StorageError> {
         Ok(self.records.len()?)
     }
+
+    pub fn unique_dids(&self) -> Result<Vec<String>, StorageError> {
+        use std::collections::HashSet;
+        let mut dids = HashSet::new();
+
+        for item in self.records.prefix(b"at://") {
+            let key = item.key()?;
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                // at://did:plc:xxx/collection/rkey
+                if let Some(rest) = key_str.strip_prefix("at://") {
+                    if let Some(slash_pos) = rest.find('/') {
+                        dids.insert(rest[..slash_pos].to_string());
+                    }
+                }
+            }
+        }
+
+        let mut result: Vec<_> = dids.into_iter().collect();
+        result.sort();
+        Ok(result)
+    }
+
+    pub fn unique_collections(&self) -> Result<Vec<String>, StorageError> {
+        use std::collections::HashSet;
+        let mut collections = HashSet::new();
+
+        for item in self.records.prefix(b"at://") {
+            let key = item.key()?;
+            if let Ok(key_str) = std::str::from_utf8(&key) {
+                // at://did:plc:xxx/collection/rkey
+                if let Some(rest) = key_str.strip_prefix("at://") {
+                    let parts: Vec<&str> = rest.splitn(3, '/').collect();
+                    if parts.len() >= 2 {
+                        collections.insert(parts[1].to_string());
+                    }
+                }
+            }
+        }
+
+        let mut result: Vec<_> = collections.into_iter().collect();
+        result.sort();
+        Ok(result)
+    }
 }
 
 #[cfg(test)]
