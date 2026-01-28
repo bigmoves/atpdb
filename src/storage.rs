@@ -1,5 +1,5 @@
 use crate::types::{AtUri, Did, Nsid};
-use fjall::{Config, Keyspace, PartitionCreateOptions, PartitionHandle};
+use fjall::{Database, Keyspace, KeyspaceCreateOptions};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use thiserror::Error;
@@ -22,15 +22,15 @@ pub struct Record {
 
 pub struct Store {
     #[allow(dead_code)]
-    keyspace: Keyspace,
-    records: PartitionHandle,
+    db: Database,
+    records: Keyspace,
 }
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self, StorageError> {
-        let keyspace = Config::new(path).open()?;
-        let records = keyspace.open_partition("records", PartitionCreateOptions::default())?;
-        Ok(Store { keyspace, records })
+        let db = Database::builder(path).open()?;
+        let records = db.keyspace("records", KeyspaceCreateOptions::default)?;
+        Ok(Store { db, records })
     }
 
     pub fn put(&self, uri: &AtUri, record: &Record) -> Result<(), StorageError> {
@@ -66,7 +66,7 @@ impl Store {
         let mut results = Vec::new();
 
         for item in self.records.prefix(prefix.as_bytes()) {
-            let (_, value) = item?;
+            let value = item.value()?;
             let record: Record = serde_json::from_slice(&value)?;
             results.push(record);
         }
