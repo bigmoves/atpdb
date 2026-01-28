@@ -33,6 +33,7 @@ pub struct IndexConfig {
     pub collection: String,
     pub field: String,
     pub field_type: IndexFieldType,
+    pub direction: IndexDirection,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -40,6 +41,22 @@ pub struct IndexConfig {
 pub enum IndexFieldType {
     Datetime,
     Integer,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexDirection {
+    Asc,
+    Desc,
+}
+
+impl std::fmt::Display for IndexDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            IndexDirection::Asc => write!(f, "asc"),
+            IndexDirection::Desc => write!(f, "desc"),
+        }
+    }
 }
 
 impl std::fmt::Display for IndexFieldType {
@@ -67,6 +84,7 @@ impl IndexConfig {
             collection: parts[0].to_string(),
             field: parts[1].to_string(),
             field_type,
+            direction: IndexDirection::Asc, // Default direction
         })
     }
 
@@ -121,7 +139,10 @@ impl Config {
         }
 
         if let Ok(collections) = std::env::var("ATPDB_COLLECTIONS") {
-            self.collections = collections.split(',').map(|s| s.trim().to_string()).collect();
+            self.collections = collections
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
         }
 
         if let Ok(parallelism) = std::env::var("ATPDB_SYNC_PARALLELISM") {
@@ -138,10 +159,15 @@ impl Config {
         }
     }
 
-    pub fn is_field_indexed(&self, collection: &str, field: &str) -> bool {
-        self.indexes
-            .iter()
-            .any(|idx| idx.collection == collection && idx.field == field)
+    pub fn is_field_indexed(
+        &self,
+        collection: &str,
+        field: &str,
+        direction: IndexDirection,
+    ) -> bool {
+        self.indexes.iter().any(|idx| {
+            idx.collection == collection && idx.field == field && idx.direction == direction
+        })
     }
 }
 
@@ -189,7 +215,9 @@ mod tests {
     fn test_config_store() {
         let dir = tempdir().unwrap();
         let db = Database::builder(dir.path()).open().unwrap();
-        let partition = db.keyspace("config", KeyspaceCreateOptions::default).unwrap();
+        let partition = db
+            .keyspace("config", KeyspaceCreateOptions::default)
+            .unwrap();
 
         const CONFIG_KEY: &[u8] = b"config";
 
@@ -208,7 +236,8 @@ mod tests {
         let value = serde_json::to_vec(&config).unwrap();
         partition.insert(CONFIG_KEY, &value).unwrap();
 
-        let loaded: Config = serde_json::from_slice(&partition.get(CONFIG_KEY).unwrap().unwrap()).unwrap();
+        let loaded: Config =
+            serde_json::from_slice(&partition.get(CONFIG_KEY).unwrap().unwrap()).unwrap();
         assert_eq!(loaded.mode, Mode::Signal);
         assert_eq!(
             loaded.signal_collection,
@@ -230,14 +259,8 @@ mod tests {
 
     #[test]
     fn test_matches_collection_filter_wildcard() {
-        assert!(matches_collection_filter(
-            "fm.teal.alpha.feed",
-            "fm.teal.*"
-        ));
-        assert!(matches_collection_filter(
-            "fm.teal.alpha.like",
-            "fm.teal.*"
-        ));
+        assert!(matches_collection_filter("fm.teal.alpha.feed", "fm.teal.*"));
+        assert!(matches_collection_filter("fm.teal.alpha.like", "fm.teal.*"));
         assert!(matches_collection_filter("fm.teal.beta", "fm.teal.*"));
         assert!(!matches_collection_filter("fm.teal", "fm.teal.*")); // Must have segment after
         assert!(!matches_collection_filter(
