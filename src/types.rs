@@ -104,10 +104,6 @@ pub struct AtUri {
 }
 
 impl AtUri {
-    pub fn new(did: Did, collection: Nsid, rkey: Rkey) -> Self {
-        Self { did, collection, rkey }
-    }
-
     pub fn to_storage_key(&self) -> Vec<u8> {
         self.to_string().into_bytes()
     }

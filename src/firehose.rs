@@ -282,7 +282,6 @@ fn parse_cid(data: &[u8]) -> Result<(String, usize), &'static str> {
         }
 
         // Read multihash: hash_type + hash_len + hash_bytes
-        let _hash_type_start = pos;
         while pos < data.len() && data[pos] & 0x80 != 0 {
             pos += 1;
         }

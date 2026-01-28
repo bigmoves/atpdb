@@ -10,8 +10,6 @@ pub enum StorageError {
     Fjall(#[from] fjall::Error),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
-    #[error("record not found")]
-    NotFound,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
