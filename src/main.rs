@@ -1,3 +1,4 @@
+mod firehose;
 mod indexer;
 mod query;
 mod storage;
