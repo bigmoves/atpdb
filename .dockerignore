@@ -1,0 +1,13 @@
+target/
+Dockerfile
+.dockerignore
+.git
+.gitignore
+README.md
+docs/
+examples/
+ideas/
+*.md
+.DS_Store
+atpdb.data/
+*.log
