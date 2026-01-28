@@ -706,29 +706,6 @@ fn parse_did_rkey_from_uri(uri: &str) -> Option<(String, String)> {
     }
 }
 
-/// Parse sort value and URI from index key
-/// Key format: idx:{a|d}:{collection}:{field}\0{sort_value}\0{did}\0{rkey}
-#[allow(dead_code)]
-fn parse_sort_value_and_uri_from_index_key(
-    key: &str,
-    collection: &str,
-) -> Option<(String, String)> {
-    let parts: Vec<&str> = key.splitn(2, '\0').collect();
-    if parts.len() != 2 {
-        return None;
-    }
-    let remainder = parts[1];
-    let subparts: Vec<&str> = remainder.splitn(3, '\0').collect();
-    if subparts.len() == 3 {
-        let sort_value = subparts[0].to_string();
-        let did = subparts[1];
-        let rkey = subparts[2];
-        let uri = format!("at://{}/{}/{}", did, collection, rkey);
-        return Some((sort_value, uri));
-    }
-    None
-}
-
 /// Parse URI from indexedAt key
 /// Key format: idx:{a|d}:__ts__:{collection}\0{timestamp}\0{did}\0{rkey}
 fn parse_uri_from_indexed_at_key(key: &str) -> Option<String> {
