@@ -177,8 +177,7 @@ pub fn matches_collection_filter(collection: &str, filter: &str) -> bool {
     if filter == "*" {
         return true;
     }
-    if filter.ends_with(".*") {
-        let prefix = &filter[..filter.len() - 2];
+    if let Some(prefix) = filter.strip_suffix(".*") {
         collection.starts_with(prefix)
             && collection.len() > prefix.len()
             && collection.as_bytes()[prefix.len()] == b'.'

@@ -47,7 +47,9 @@ impl AppState {
         let store = Store::from_keyspace(records);
 
         // Clean up indexes not in config
-        let configured_prefixes: std::collections::HashSet<String> = config.indexes.iter()
+        let configured_prefixes: std::collections::HashSet<String> = config
+            .indexes
+            .iter()
             .map(|idx| {
                 let dir_char = match idx.direction {
                     IndexDirection::Asc => 'a',
@@ -82,7 +84,10 @@ impl AppState {
 
                                 // If not in config, mark for deletion
                                 if !configured_prefixes.contains(&prefix) {
-                                    println!("Removing orphaned index: {}", &prefix[..prefix.len()-1]);
+                                    println!(
+                                        "Removing orphaned index: {}",
+                                        &prefix[..prefix.len() - 1]
+                                    );
                                 }
                             }
 
@@ -123,7 +128,8 @@ impl AppState {
 
             if needs_rebuild {
                 // Delete old index entries first (for this direction only)
-                let keys: Vec<_> = store.records_keyspace()
+                let keys: Vec<_> = store
+                    .records_keyspace()
                     .prefix(prefix.as_bytes())
                     .filter_map(|item| item.key().ok().map(|k| k.to_vec()))
                     .collect();
@@ -131,7 +137,10 @@ impl AppState {
                     let _ = store.records_keyspace().remove(&key);
                 }
 
-                println!("Building index {}:{}:{}...", index.collection, index.field, index.direction);
+                println!(
+                    "Building index {}:{}:{}...",
+                    index.collection, index.field, index.direction
+                );
                 match store.rebuild_index(index) {
                     Ok(count) => println!("Built index with {} entries", count),
                     Err(e) => eprintln!("Error building index: {}", e),
@@ -147,7 +156,11 @@ impl AppState {
                 continue;
             }
             let ts_prefix = format!("idx:a:__ts__:{}\0", collection);
-            let has_ts_index = store.records_keyspace().prefix(ts_prefix.as_bytes()).next().is_some();
+            let has_ts_index = store
+                .records_keyspace()
+                .prefix(ts_prefix.as_bytes())
+                .next()
+                .is_some();
 
             if !has_ts_index {
                 println!("Rebuilding __ts__ index for {}...", collection);
@@ -172,8 +185,7 @@ impl AppState {
     }
 
     pub fn set_config(&self, config: Config) -> Result<(), AppError> {
-        let value =
-            serde_json::to_vec(&config).map_err(|e| ConfigError::Serialization(e))?;
+        let value = serde_json::to_vec(&config).map_err(ConfigError::Serialization)?;
         self.config_keyspace.insert(CONFIG_KEY, &value)?;
         *self.config.write().unwrap() = config;
         Ok(())
@@ -197,7 +209,8 @@ impl AppState {
     }
 
     pub fn set_cursor(&self, key: &str, cursor: &str) -> Result<(), AppError> {
-        self.crawler_cursors.insert(key.as_bytes(), cursor.as_bytes())?;
+        self.crawler_cursors
+            .insert(key.as_bytes(), cursor.as_bytes())?;
         Ok(())
     }
 

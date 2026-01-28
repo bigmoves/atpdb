@@ -836,8 +836,7 @@ fn start_firehose(
                                 }
                                 Mode::Signal => {
                                     // Check if this commit contains a signal collection record
-                                    let has_signal = config.signal_collection.as_ref().map_or(
-                                        false,
+                                    let has_signal = config.signal_collection.as_ref().is_some_and(
                                         |signal| {
                                             operations.iter().any(|op| match op {
                                                 Operation::Create { uri, .. } => {

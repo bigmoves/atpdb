@@ -8,14 +8,14 @@ use thiserror::Error;
 
 /// Ensure URL has https:// scheme for HTTP API calls
 fn to_https_url(url: &str) -> String {
-    if url.starts_with("https://") {
-        url.to_string()
-    } else if url.starts_with("http://") {
-        url.to_string()
-    } else if url.starts_with("wss://") {
-        format!("https://{}", &url[6..])
-    } else if url.starts_with("ws://") {
-        format!("http://{}", &url[5..])
+    if let Some(stripped) = url.strip_prefix("https://") {
+        stripped.to_string()
+    } else if let Some(stripped) = url.strip_prefix("http://") {
+        stripped.to_string()
+    } else if let Some(stripped) = url.strip_prefix("wss://") {
+        format!("https://{}", stripped)
+    } else if let Some(stripped) = url.strip_prefix("ws://") {
+        format!("http://{}", stripped)
     } else {
         format!("https://{}", url)
     }
@@ -39,8 +39,9 @@ pub struct ListReposResponse {
 #[derive(Debug, Deserialize)]
 pub struct RepoInfo {
     pub did: String,
+    #[allow(dead_code)]
     pub head: String,
-    #[serde(default)]
+    #[allow(dead_code)]
     pub active: Option<bool>,
 }
 
@@ -87,10 +88,7 @@ impl Crawler {
                     "{}/xrpc/com.atproto.sync.listRepos?limit=1000&cursor={}",
                     relay_base, c
                 ),
-                _ => format!(
-                    "{}/xrpc/com.atproto.sync.listRepos?limit=1000",
-                    relay_base
-                ),
+                _ => format!("{}/xrpc/com.atproto.sync.listRepos?limit=1000", relay_base),
             };
 
             println!("Crawling: {}", url);
@@ -190,7 +188,10 @@ impl Crawler {
             }
             Mode::Signal => {
                 if let Some(ref collection) = config.signal_collection {
-                    println!("Crawler: Signal mode, enumerating by collection: {}", collection);
+                    println!(
+                        "Crawler: Signal mode, enumerating by collection: {}",
+                        collection
+                    );
                     self.enumerate_by_collection(collection)
                 } else {
                     println!("Crawler: Signal mode but no signal_collection configured");

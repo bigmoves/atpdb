@@ -62,11 +62,7 @@ impl Store {
 
     /// Build storage key from AtUri
     fn storage_key_from_uri(uri: &AtUri) -> Vec<u8> {
-        Self::storage_key(
-            uri.collection.as_str(),
-            uri.did.as_str(),
-            uri.rkey.as_str(),
-        )
+        Self::storage_key(uri.collection.as_str(), uri.did.as_str(), uri.rkey.as_str())
     }
 
     /// Encode integer for lexicographic sorting (handles negative numbers)
@@ -82,7 +78,13 @@ impl Store {
     }
 
     /// Build index key for ascending order
-    fn index_key_asc(collection: &str, field: &str, sort_value: &str, did: &str, rkey: &str) -> Vec<u8> {
+    fn index_key_asc(
+        collection: &str,
+        field: &str,
+        sort_value: &str,
+        did: &str,
+        rkey: &str,
+    ) -> Vec<u8> {
         format!(
             "idx:a:{}:{}\0{}\0{}\0{}",
             collection, field, sort_value, did, rkey
@@ -91,7 +93,13 @@ impl Store {
     }
 
     /// Build index key for descending order (inverted sort value)
-    fn index_key_desc(collection: &str, field: &str, sort_value: &str, did: &str, rkey: &str) -> Vec<u8> {
+    fn index_key_desc(
+        collection: &str,
+        field: &str,
+        sort_value: &str,
+        did: &str,
+        rkey: &str,
+    ) -> Vec<u8> {
         let inverted = Self::invert_sort_value(sort_value);
         format!(
             "idx:d:{}:{}\0{}\0{}\0{}",
@@ -152,8 +160,12 @@ impl Store {
         if let Some(sv) = sort_value {
             let record_bytes = serde_json::to_vec(record)?;
             let key = match index.direction {
-                IndexDirection::Asc => Self::index_key_asc(&index.collection, &index.field, &sv, did, rkey),
-                IndexDirection::Desc => Self::index_key_desc(&index.collection, &index.field, &sv, did, rkey),
+                IndexDirection::Asc => {
+                    Self::index_key_asc(&index.collection, &index.field, &sv, did, rkey)
+                }
+                IndexDirection::Desc => {
+                    Self::index_key_desc(&index.collection, &index.field, &sv, did, rkey)
+                }
             };
             self.records.insert(&key, &record_bytes)?;
         }
@@ -213,8 +225,12 @@ impl Store {
         let sort_value = self.extract_sort_value(&record.value, &index.field, index.field_type)?;
         if let Some(sv) = sort_value {
             let key = match index.direction {
-                IndexDirection::Asc => Self::index_key_asc(&index.collection, &index.field, &sv, did, rkey),
-                IndexDirection::Desc => Self::index_key_desc(&index.collection, &index.field, &sv, did, rkey),
+                IndexDirection::Asc => {
+                    Self::index_key_asc(&index.collection, &index.field, &sv, did, rkey)
+                }
+                IndexDirection::Desc => {
+                    Self::index_key_desc(&index.collection, &index.field, &sv, did, rkey)
+                }
             };
             self.records.remove(&key)?;
         }
@@ -692,7 +708,11 @@ fn parse_did_rkey_from_uri(uri: &str) -> Option<(String, String)> {
 
 /// Parse sort value and URI from index key
 /// Key format: idx:{a|d}:{collection}:{field}\0{sort_value}\0{did}\0{rkey}
-fn parse_sort_value_and_uri_from_index_key(key: &str, collection: &str) -> Option<(String, String)> {
+#[allow(dead_code)]
+fn parse_sort_value_and_uri_from_index_key(
+    key: &str,
+    collection: &str,
+) -> Option<(String, String)> {
     let parts: Vec<&str> = key.splitn(2, '\0').collect();
     if parts.len() != 2 {
         return None;
@@ -818,7 +838,11 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
 
         // Insert posts from different DIDs
-        for (did, rkey) in [("did:plc:aaa", "1"), ("did:plc:bbb", "2"), ("did:plc:ccc", "3")] {
+        for (did, rkey) in [
+            ("did:plc:aaa", "1"),
+            ("did:plc:bbb", "2"),
+            ("did:plc:ccc", "3"),
+        ] {
             let uri: AtUri = format!("at://{}/app.bsky.feed.post/{}", did, rkey)
                 .parse()
                 .unwrap();
