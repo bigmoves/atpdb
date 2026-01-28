@@ -1,4 +1,4 @@
-use crate::storage::{Record, Store, StorageError};
+use crate::storage::{Record, StorageError, Store};
 use crate::types::{AtUri, Did, Nsid, ParseError};
 use thiserror::Error;
 
@@ -30,7 +30,9 @@ impl Query {
         let parts: Vec<&str> = without_scheme.splitn(3, '/').collect();
 
         if parts.len() != 3 {
-            return Err(QueryError::Invalid("expected did/collection/rkey".to_string()));
+            return Err(QueryError::Invalid(
+                "expected did/collection/rkey".to_string(),
+            ));
         }
 
         let did: Did = parts[0].parse()?;
@@ -48,15 +50,11 @@ impl Query {
 
 pub fn execute(query: &Query, store: &Store) -> Result<Vec<Record>, QueryError> {
     match query {
-        Query::Exact(uri) => {
-            match store.get(uri)? {
-                Some(record) => Ok(vec![record]),
-                None => Ok(vec![]),
-            }
-        }
-        Query::Collection { did, collection } => {
-            Ok(store.scan_collection(did, collection)?)
-        }
+        Query::Exact(uri) => match store.get(uri)? {
+            Some(record) => Ok(vec![record]),
+            None => Ok(vec![]),
+        },
+        Query::Collection { did, collection } => Ok(store.scan_collection(did, collection)?),
     }
 }
 

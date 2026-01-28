@@ -15,12 +15,14 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
-    println!(r#"
+    println!(
+        r#"
    ___  ______ ___  ___  ___
   / _ |/_  __// _ \/ _ \/ _ )
  / __ | / /  / ___/ // / _  |
 /_/ |_|/_/  /_/  /____/____/
-"#);
+"#
+    );
 
     let store = match storage::Store::open(Path::new("./atpdb.data")) {
         Ok(s) => Arc::new(s),
@@ -64,12 +66,10 @@ fn main() {
                         println!("  at://did/collection/*      Get all records in collection");
                     }
 
-                    ".stats" => {
-                        match store.count() {
-                            Ok(count) => println!("Records: {}", count),
-                            Err(e) => println!("Error: {}", e),
-                        }
-                    }
+                    ".stats" => match store.count() {
+                        Ok(count) => println!("Records: {}", count),
+                        Err(e) => println!("Error: {}", e),
+                    },
 
                     ".disconnect" => {
                         running.store(false, Ordering::Relaxed);
@@ -114,12 +114,15 @@ fn main() {
                                                                     .unwrap()
                                                                     .as_secs(),
                                                             };
-                                                            if let Err(e) = store_clone.put(&uri, &record) {
+                                                            if let Err(e) =
+                                                                store_clone.put(&uri, &record)
+                                                            {
                                                                 eprintln!("Storage error: {}", e);
                                                             }
                                                         }
                                                         Operation::Delete { uri } => {
-                                                            if let Err(e) = store_clone.delete(&uri) {
+                                                            if let Err(e) = store_clone.delete(&uri)
+                                                            {
                                                                 eprintln!("Storage error: {}", e);
                                                             }
                                                         }
@@ -146,25 +149,26 @@ fn main() {
                         });
                     }
 
-                    line if line.starts_with("at://") => {
-                        match Query::parse(line) {
-                            Ok(q) => {
-                                let start = std::time::Instant::now();
-                                match query::execute(&q, &store) {
-                                    Ok(records) => {
-                                        let elapsed = start.elapsed();
-                                        for record in &records {
-                                            println!("{}", serde_json::to_string_pretty(&record.value).unwrap());
-                                            println!("---");
-                                        }
-                                        println!("({} records, {:.2?})", records.len(), elapsed);
+                    line if line.starts_with("at://") => match Query::parse(line) {
+                        Ok(q) => {
+                            let start = std::time::Instant::now();
+                            match query::execute(&q, &store) {
+                                Ok(records) => {
+                                    let elapsed = start.elapsed();
+                                    for record in &records {
+                                        println!(
+                                            "{}",
+                                            serde_json::to_string_pretty(&record.value).unwrap()
+                                        );
+                                        println!("---");
                                     }
-                                    Err(e) => println!("Query error: {}", e),
+                                    println!("({} records, {:.2?})", records.len(), elapsed);
                                 }
+                                Err(e) => println!("Query error: {}", e),
                             }
-                            Err(e) => println!("Parse error: {}", e),
                         }
-                    }
+                        Err(e) => println!("Parse error: {}", e),
+                    },
 
                     _ => println!("Unknown command. Type .help for help."),
                 }

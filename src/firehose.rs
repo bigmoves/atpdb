@@ -7,7 +7,7 @@ use tungstenite::{connect, Message};
 #[derive(Error, Debug)]
 pub enum FirehoseError {
     #[error("websocket error: {0}")]
-    WebSocket(#[from] tungstenite::Error),
+    WebSocket(#[from] Box<tungstenite::Error>),
     #[error("cbor decode error: {0}")]
     Cbor(String),
     #[error("invalid message")]
@@ -17,6 +17,7 @@ pub enum FirehoseError {
 #[derive(Debug)]
 pub enum Event {
     Commit {
+        #[allow(dead_code)]
         did: Did,
         operations: Vec<Operation>,
     },
@@ -93,13 +94,13 @@ pub struct FirehoseClient {
 impl FirehoseClient {
     pub fn connect(relay: &str) -> Result<Self, FirehoseError> {
         let url = format!("wss://{}/xrpc/com.atproto.sync.subscribeRepos", relay);
-        let (socket, _response) = connect(&url)?;
+        let (socket, _response) = connect(&url).map_err(Box::new)?;
         Ok(FirehoseClient { socket })
     }
 
     pub fn next_event(&mut self) -> Result<Option<Event>, FirehoseError> {
         loop {
-            let msg = self.socket.read()?;
+            let msg = self.socket.read().map_err(Box::new)?;
 
             match msg {
                 Message::Binary(data) => {
@@ -115,8 +116,8 @@ impl FirehoseClient {
         let mut cursor = Cursor::new(data);
 
         // Decode header
-        let header: Header = ciborium::from_reader(&mut cursor)
-            .map_err(|e| FirehoseError::Cbor(e.to_string()))?;
+        let header: Header =
+            ciborium::from_reader(&mut cursor).map_err(|e| FirehoseError::Cbor(e.to_string()))?;
 
         // Only handle commits (op=1, t="#commit")
         if header.op != 1 || header.t.as_deref() != Some("#commit") {
@@ -124,10 +125,12 @@ impl FirehoseClient {
         }
 
         // Decode commit body
-        let body: CommitBody = ciborium::from_reader(&mut cursor)
-            .map_err(|e| FirehoseError::Cbor(e.to_string()))?;
+        let body: CommitBody =
+            ciborium::from_reader(&mut cursor).map_err(|e| FirehoseError::Cbor(e.to_string()))?;
 
-        let did: Did = body.repo.parse()
+        let did: Did = body
+            .repo
+            .parse()
             .map_err(|_| FirehoseError::InvalidMessage)?;
 
         // Parse CAR blocks to get record data
@@ -167,7 +170,10 @@ impl FirehoseClient {
         Ok(Some(Event::Commit { did, operations }))
     }
 
-    fn parse_car_blocks(&self, car_bytes: &[u8]) -> Result<std::collections::HashMap<String, serde_json::Value>, FirehoseError> {
+    fn parse_car_blocks(
+        &self,
+        car_bytes: &[u8],
+    ) -> Result<std::collections::HashMap<String, serde_json::Value>, FirehoseError> {
         let mut blocks = std::collections::HashMap::new();
 
         if car_bytes.is_empty() {
@@ -177,8 +183,8 @@ impl FirehoseClient {
         let mut cursor = Cursor::new(car_bytes);
 
         // Read CAR header (varint length + dag-cbor header)
-        let header_len = read_varint(&mut cursor)
-            .map_err(|e| FirehoseError::Cbor(e.to_string()))?;
+        let header_len =
+            read_varint(&mut cursor).map_err(|e| FirehoseError::Cbor(e.to_string()))?;
 
         // Skip header bytes
         let pos = cursor.position() as usize;
@@ -246,7 +252,10 @@ fn read_varint<R: std::io::Read>(reader: &mut R) -> Result<usize, std::io::Error
         shift += 7;
 
         if shift > 63 {
-            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "varint too long"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "varint too long",
+            ));
         }
     }
 
@@ -296,8 +305,7 @@ fn parse_cid(data: &[u8]) -> Result<(String, usize), &'static str> {
         pos += hash_len;
 
         let cid_bytes = &data[..pos];
-        let cid = libipld::Cid::try_from(cid_bytes)
-            .map_err(|_| "invalid cid")?;
+        let cid = libipld::Cid::try_from(cid_bytes).map_err(|_| "invalid cid")?;
 
         Ok((cid.to_string(), pos))
     } else {

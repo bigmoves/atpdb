@@ -1,6 +1,7 @@
 use crate::types::AtUri;
 use serde_json::Value;
 
+#[allow(dead_code)]
 pub fn extract_refs(value: &Value) -> Vec<AtUri> {
     let mut refs = Vec::new();
     walk_json(value, &mut refs);
@@ -49,7 +50,10 @@ mod tests {
         });
         let refs = extract_refs(&value);
         assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].to_string(), "at://did:plc:xyz/app.bsky.feed.post/abc");
+        assert_eq!(
+            refs[0].to_string(),
+            "at://did:plc:xyz/app.bsky.feed.post/abc"
+        );
     }
 
     #[test]

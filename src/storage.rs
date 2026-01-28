@@ -57,7 +57,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn scan_collection(&self, did: &Did, collection: &Nsid) -> Result<Vec<Record>, StorageError> {
+    pub fn scan_collection(
+        &self,
+        did: &Did,
+        collection: &Nsid,
+    ) -> Result<Vec<Record>, StorageError> {
         let prefix = format!("at://{}/{}/", did, collection);
         let mut results = Vec::new();
 
@@ -128,7 +132,9 @@ mod tests {
 
         // Insert 3 posts
         for rkey in ["a", "b", "c"] {
-            let uri: AtUri = format!("at://did:plc:xyz/app.bsky.feed.post/{}", rkey).parse().unwrap();
+            let uri: AtUri = format!("at://did:plc:xyz/app.bsky.feed.post/{}", rkey)
+                .parse()
+                .unwrap();
             let record = Record {
                 uri: uri.to_string(),
                 cid: format!("cid-{}", rkey),

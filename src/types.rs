@@ -3,21 +3,23 @@ use std::str::FromStr;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+#[allow(clippy::enum_variant_names)]
 pub enum ParseError {
     #[error("invalid DID: {0}")]
-    InvalidDid(String),
+    Did(String),
     #[error("invalid NSID: {0}")]
-    InvalidNsid(String),
+    Nsid(String),
     #[error("invalid rkey: {0}")]
-    InvalidRkey(String),
+    Rkey(String),
     #[error("invalid AT-URI: {0}")]
-    InvalidAtUri(String),
+    AtUri(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Did(String);
 
 impl Did {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -30,7 +32,7 @@ impl FromStr for Did {
         if s.starts_with("did:plc:") || s.starts_with("did:web:") {
             Ok(Did(s.to_string()))
         } else {
-            Err(ParseError::InvalidDid(s.to_string()))
+            Err(ParseError::Did(s.to_string()))
         }
     }
 }
@@ -45,6 +47,7 @@ impl fmt::Display for Did {
 pub struct Nsid(String);
 
 impl Nsid {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -58,7 +61,7 @@ impl FromStr for Nsid {
         if s.contains('.') && !s.contains(' ') && !s.is_empty() {
             Ok(Nsid(s.to_string()))
         } else {
-            Err(ParseError::InvalidNsid(s.to_string()))
+            Err(ParseError::Nsid(s.to_string()))
         }
     }
 }
@@ -73,6 +76,7 @@ impl fmt::Display for Nsid {
 pub struct Rkey(String);
 
 impl Rkey {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -85,7 +89,7 @@ impl FromStr for Rkey {
         if !s.is_empty() && !s.contains('/') {
             Ok(Rkey(s.to_string()))
         } else {
-            Err(ParseError::InvalidRkey(s.to_string()))
+            Err(ParseError::Rkey(s.to_string()))
         }
     }
 }
@@ -113,19 +117,24 @@ impl FromStr for AtUri {
     type Err = ParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let s = s.strip_prefix("at://")
-            .ok_or_else(|| ParseError::InvalidAtUri(s.to_string()))?;
+        let s = s
+            .strip_prefix("at://")
+            .ok_or_else(|| ParseError::AtUri(s.to_string()))?;
 
         let parts: Vec<&str> = s.splitn(3, '/').collect();
         if parts.len() != 3 {
-            return Err(ParseError::InvalidAtUri(s.to_string()));
+            return Err(ParseError::AtUri(s.to_string()));
         }
 
         let did: Did = parts[0].parse()?;
         let collection: Nsid = parts[1].parse()?;
         let rkey: Rkey = parts[2].parse()?;
 
-        Ok(AtUri { did, collection, rkey })
+        Ok(AtUri {
+            did,
+            collection,
+            rkey,
+        })
     }
 }
 
@@ -183,7 +192,9 @@ mod tests {
 
     #[test]
     fn test_aturi_parse() {
-        let uri: AtUri = "at://did:plc:xyz/app.bsky.feed.post/3k2a1b".parse().unwrap();
+        let uri: AtUri = "at://did:plc:xyz/app.bsky.feed.post/3k2a1b"
+            .parse()
+            .unwrap();
         assert_eq!(uri.did.as_str(), "did:plc:xyz");
         assert_eq!(uri.collection.as_str(), "app.bsky.feed.post");
         assert_eq!(uri.rkey.as_str(), "3k2a1b");
