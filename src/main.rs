@@ -25,6 +25,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 enum CommandResult {
     Continue,
@@ -915,6 +916,14 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
 }
 
 fn main() {
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "atpdb=info,tower_http=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
     let args: Vec<String> = std::env::args().collect();
 
     // Check for serve subcommand
@@ -963,15 +972,6 @@ fn main() {
     }
 
     // Interactive mode
-    println!(
-        r#"
-   ___  ______ ___  ___  ___
-  / _ |/_  __// _ \/ _ \/ _ )
- / __ | / /  / ___/ // / _  |
-/_/ |_|/_/  /_/  /____/____/
-"#
-    );
-
     let app = match AppState::open(Path::new("./atpdb.data")) {
         Ok(a) => Arc::new(a),
         Err(e) => {
@@ -979,6 +979,11 @@ fn main() {
             return;
         }
     };
+
+    println!("ATPDB version {}", env!("CARGO_PKG_VERSION"));
+    println!("Enter \".help\" for usage hints.");
+    println!("Example: at://*/app.bsky.feed.post/*");
+    println!();
 
     let running = Arc::new(AtomicBool::new(false));
     let mut rl = DefaultEditor::new().unwrap();

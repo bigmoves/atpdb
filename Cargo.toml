@@ -24,6 +24,8 @@ base64 = "0.22"
 chrono = "0.4.43"
 rayon = "1.10"
 parking_lot = "0.12"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tantivy = "0.22"
 urlencoding = "2"
 

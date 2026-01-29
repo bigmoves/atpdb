@@ -36,7 +36,7 @@ impl AppState {
     pub fn open(path: &Path) -> Result<Self, AppError> {
         let start = std::time::Instant::now();
         let db = Database::builder(path).open()?;
-        eprintln!("[startup] db open: {:?}", start.elapsed());
+        tracing::debug!("db open: {:?}", start.elapsed());
 
         let records = db.keyspace("records", KeyspaceCreateOptions::default)?;
         let repos_keyspace = db.keyspace("repos", KeyspaceCreateOptions::default)?;
@@ -52,7 +52,7 @@ impl AppState {
         config.apply_env_overrides();
 
         let store = Store::from_keyspace(records);
-        eprintln!("[startup] keyspaces ready: {:?}", start.elapsed());
+        tracing::debug!("keyspaces ready: {:?}", start.elapsed());
 
         // Build missing indexes on startup
         for index in &config.indexes {
@@ -110,17 +110,17 @@ impl AppState {
             }
         }
 
-        eprintln!("[startup] indexes checked: {:?}", start.elapsed());
+        tracing::debug!("indexes checked: {:?}", start.elapsed());
 
         // Initialize search index
         let search_path = path.join("search");
         let search = match SearchIndex::open(&search_path) {
             Ok(idx) => {
-                eprintln!("[startup] search index opened at {:?}", search_path);
+                tracing::debug!("search index opened at {:?}", search_path);
                 Some(idx)
             }
             Err(e) => {
-                eprintln!("[startup] warning: failed to open search index: {}. Search disabled.", e);
+                tracing::warn!("failed to open search index: {}. Search disabled.", e);
                 None
             }
         };
