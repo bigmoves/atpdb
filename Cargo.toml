@@ -16,13 +16,14 @@ thiserror = "2"
 url = "2"
 libipld = { version = "0.16", features = ["dag-cbor"] }
 axum = "0.8"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-tower-http = { version = "0.6", features = ["cors"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal"] }
+tower-http = { version = "0.6", features = ["cors", "compression-gzip"] }
 reqwest = { version = "0.12", features = ["blocking", "json"] }
 repo-stream = "0.4"
 base64 = "0.22"
 chrono = "0.4.43"
 rayon = "1.10"
+parking_lot = "0.12"
 
 [dev-dependencies]
 tempfile = "3"

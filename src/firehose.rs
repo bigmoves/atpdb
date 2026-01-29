@@ -7,10 +7,10 @@ use tungstenite::{connect, Message};
 
 /// Convert HTTP/HTTPS URL to WebSocket URL
 fn to_websocket_url(url: &str) -> String {
-    if let Some(stripped) = url.strip_prefix("https://") {
-        format!("wss://{}", stripped)
-    } else if let Some(stripped) = url.strip_prefix("http://") {
-        format!("ws://{}", stripped)
+    if let Some(rest) = url.strip_prefix("https://") {
+        format!("wss://{}", rest)
+    } else if let Some(rest) = url.strip_prefix("http://") {
+        format!("ws://{}", rest)
     } else if url.starts_with("wss://") || url.starts_with("ws://") {
         url.to_string()
     } else {
@@ -110,10 +110,7 @@ pub struct FirehoseClient {
 impl FirehoseClient {
     pub fn connect(relay: &str) -> Result<Self, FirehoseError> {
         let base = to_websocket_url(relay);
-        let url = format!(
-            "{}/xrpc/com.atproto.sync.subscribeRepos",
-            base.trim_end_matches('/')
-        );
+        let url = format!("{}/xrpc/com.atproto.sync.subscribeRepos", base.trim_end_matches('/'));
         let (socket, _response) = connect(&url).map_err(Box::new)?;
         Ok(FirehoseClient { socket })
     }

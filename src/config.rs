@@ -28,25 +28,11 @@ impl std::fmt::Display for Mode {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct IndexConfig {
-    pub collection: String,
-    pub field: String,
-    pub field_type: IndexFieldType,
-    pub direction: IndexDirection,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum IndexFieldType {
-    Datetime,
-    Integer,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum IndexDirection {
     Asc,
+    #[default]
     Desc,
 }
 
@@ -59,6 +45,22 @@ impl std::fmt::Display for IndexDirection {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct IndexConfig {
+    pub collection: String,
+    pub field: String,
+    pub field_type: IndexFieldType,
+    #[serde(default)]
+    pub direction: IndexDirection,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum IndexFieldType {
+    Datetime,
+    Integer,
+}
+
 impl std::fmt::Display for IndexFieldType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -69,10 +71,11 @@ impl std::fmt::Display for IndexFieldType {
 }
 
 impl IndexConfig {
-    /// Parse from string format: "collection:field:type"
+    /// Parse from string format: "collection:field:type[:direction]"
+    /// Direction is optional, defaults to "desc"
     pub fn parse(s: &str) -> Option<Self> {
         let parts: Vec<&str> = s.split(':').collect();
-        if parts.len() != 3 {
+        if parts.len() < 3 || parts.len() > 4 {
             return None;
         }
         let field_type = match parts[2] {
@@ -80,17 +83,26 @@ impl IndexConfig {
             "integer" => IndexFieldType::Integer,
             _ => return None,
         };
+        let direction = if parts.len() == 4 {
+            match parts[3] {
+                "asc" => IndexDirection::Asc,
+                "desc" => IndexDirection::Desc,
+                _ => return None,
+            }
+        } else {
+            IndexDirection::Desc // default
+        };
         Some(IndexConfig {
             collection: parts[0].to_string(),
             field: parts[1].to_string(),
             field_type,
-            direction: IndexDirection::Asc, // Default direction
+            direction,
         })
     }
 
-    /// Format as string: "collection:field:type"
+    /// Format as string: "collection:field:type:direction"
     pub fn to_config_string(&self) -> String {
-        format!("{}:{}:{}", self.collection, self.field, self.field_type)
+        format!("{}:{}:{}:{}", self.collection, self.field, self.field_type, self.direction)
     }
 }
 
@@ -139,10 +151,7 @@ impl Config {
         }
 
         if let Ok(collections) = std::env::var("ATPDB_COLLECTIONS") {
-            self.collections = collections
-                .split(',')
-                .map(|s| s.trim().to_string())
-                .collect();
+            self.collections = collections.split(',').map(|s| s.trim().to_string()).collect();
         }
 
         if let Ok(parallelism) = std::env::var("ATPDB_SYNC_PARALLELISM") {
@@ -159,16 +168,12 @@ impl Config {
         }
     }
 
-    pub fn is_field_indexed(
-        &self,
-        collection: &str,
-        field: &str,
-        direction: IndexDirection,
-    ) -> bool {
-        self.indexes.iter().any(|idx| {
-            idx.collection == collection && idx.field == field && idx.direction == direction
-        })
+    pub fn is_field_indexed(&self, collection: &str, field: &str, direction: IndexDirection) -> bool {
+        self.indexes
+            .iter()
+            .any(|idx| idx.collection == collection && idx.field == field && idx.direction == direction)
     }
+
 }
 
 /// Check if a collection matches a filter pattern
@@ -214,9 +219,7 @@ mod tests {
     fn test_config_store() {
         let dir = tempdir().unwrap();
         let db = Database::builder(dir.path()).open().unwrap();
-        let partition = db
-            .keyspace("config", KeyspaceCreateOptions::default)
-            .unwrap();
+        let partition = db.keyspace("config", KeyspaceCreateOptions::default).unwrap();
 
         const CONFIG_KEY: &[u8] = b"config";
 
@@ -235,8 +238,7 @@ mod tests {
         let value = serde_json::to_vec(&config).unwrap();
         partition.insert(CONFIG_KEY, &value).unwrap();
 
-        let loaded: Config =
-            serde_json::from_slice(&partition.get(CONFIG_KEY).unwrap().unwrap()).unwrap();
+        let loaded: Config = serde_json::from_slice(&partition.get(CONFIG_KEY).unwrap().unwrap()).unwrap();
         assert_eq!(loaded.mode, Mode::Signal);
         assert_eq!(
             loaded.signal_collection,
@@ -258,8 +260,14 @@ mod tests {
 
     #[test]
     fn test_matches_collection_filter_wildcard() {
-        assert!(matches_collection_filter("fm.teal.alpha.feed", "fm.teal.*"));
-        assert!(matches_collection_filter("fm.teal.alpha.like", "fm.teal.*"));
+        assert!(matches_collection_filter(
+            "fm.teal.alpha.feed",
+            "fm.teal.*"
+        ));
+        assert!(matches_collection_filter(
+            "fm.teal.alpha.like",
+            "fm.teal.*"
+        ));
         assert!(matches_collection_filter("fm.teal.beta", "fm.teal.*"));
         assert!(!matches_collection_filter("fm.teal", "fm.teal.*")); // Must have segment after
         assert!(!matches_collection_filter(

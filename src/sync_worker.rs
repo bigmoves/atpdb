@@ -72,7 +72,9 @@ async fn sync_one_repo(app: &AppState, did: &str) {
     if let Ok(Some(mut state)) = app.repos.get(did) {
         state.status = RepoStatus::Syncing;
         state.error = None;
-        let _ = app.repos.put(&state);
+        if let Err(e) = app.repos.put(&state) {
+            eprintln!("Failed to update repo status for {}: {}", did, e);
+        }
     }
 
     let config = app.config();
@@ -111,7 +113,9 @@ async fn sync_one_repo(app: &AppState, did: &str) {
                 state.next_retry = Some(calculate_next_retry(state.retry_count));
             }
         }
-        let _ = app.repos.put(&state);
+        if let Err(e) = app.repos.put(&state) {
+            eprintln!("Failed to update repo state for {}: {}", did, e);
+        }
     }
 }
 
@@ -127,7 +131,9 @@ async fn retry_loop(app: Arc<AppState>) {
                         // Reset to pending for retry
                         let mut state = repo.clone();
                         state.status = RepoStatus::Pending;
-                        let _ = app.repos.put(&state);
+                        if let Err(e) = app.repos.put(&state) {
+                            eprintln!("Failed to reset repo {} for retry: {}", repo.did, e);
+                        }
                     }
                 }
             }

@@ -77,6 +77,11 @@ impl Store {
         }
     }
 
+    /// Sanitize a value for use in index keys by escaping null bytes
+    fn sanitize_key_value(s: &str) -> String {
+        s.replace('\0', "\\0")
+    }
+
     /// Build index key for ascending order
     fn index_key_asc(
         collection: &str,
@@ -87,7 +92,11 @@ impl Store {
     ) -> Vec<u8> {
         format!(
             "idx:a:{}:{}\0{}\0{}\0{}",
-            collection, field, sort_value, did, rkey
+            Self::sanitize_key_value(collection),
+            Self::sanitize_key_value(field),
+            Self::sanitize_key_value(sort_value),
+            did,
+            rkey
         )
         .into_bytes()
     }
@@ -103,17 +112,21 @@ impl Store {
         let inverted = Self::invert_sort_value(sort_value);
         format!(
             "idx:d:{}:{}\0{}\0{}\0{}",
-            collection, field, inverted, did, rkey
+            Self::sanitize_key_value(collection),
+            Self::sanitize_key_value(field),
+            Self::sanitize_key_value(&inverted),
+            did,
+            rkey
         )
         .into_bytes()
     }
 
     fn index_prefix_asc(collection: &str, field: &str) -> Vec<u8> {
-        format!("idx:a:{}:{}\0", collection, field).into_bytes()
+        format!("idx:a:{}:{}\0", Self::sanitize_key_value(collection), Self::sanitize_key_value(field)).into_bytes()
     }
 
     fn index_prefix_desc(collection: &str, field: &str) -> Vec<u8> {
-        format!("idx:d:{}:{}\0", collection, field).into_bytes()
+        format!("idx:d:{}:{}\0", Self::sanitize_key_value(collection), Self::sanitize_key_value(field)).into_bytes()
     }
 
     /// Build indexedAt keys (both directions)
@@ -291,6 +304,9 @@ impl Store {
         record: &Record,
         indexes: &[IndexConfig],
     ) -> Result<(), StorageError> {
+        // Check if this is an update (record already exists)
+        let is_new = self.get(uri)?.is_none();
+
         // Write primary record
         self.put(uri, record)?;
 
@@ -309,6 +325,11 @@ impl Store {
             }
         }
 
+        // Increment counter only for new records
+        if is_new {
+            self.increment_count(uri.collection.as_str())?;
+        }
+
         Ok(())
     }
 
@@ -319,7 +340,7 @@ impl Store {
         indexes: &[IndexConfig],
     ) -> Result<(), StorageError> {
         // Get record first to know index values
-        if let Some(record) = self.get(uri)? {
+        let existed = if let Some(record) = self.get(uri)? {
             // Delete indexes
             self.delete_indexed_at_entry(
                 uri.collection.as_str(),
@@ -333,10 +354,18 @@ impl Store {
                     self.delete_index_entry(index, &record, uri.did.as_str(), uri.rkey.as_str())?;
                 }
             }
-        }
+            true
+        } else {
+            false
+        };
 
         // Delete primary record
         self.delete(uri)?;
+
+        // Decrement counter only if record existed
+        if existed {
+            self.decrement_count(uri.collection.as_str())?;
+        }
 
         Ok(())
     }
@@ -453,11 +482,53 @@ impl Store {
         Ok(self.records.len()?)
     }
 
-    /// Count records in a specific collection using the __ts__ index (faster than scanning records)
+    /// Key for collection counters
+    fn count_key(collection: &str) -> Vec<u8> {
+        format!("__count__:{}", collection).into_bytes()
+    }
+
+    /// Increment collection counter
+    fn increment_count(&self, collection: &str) -> Result<(), StorageError> {
+        let key = Self::count_key(collection);
+        let current = self.get_count_raw(&key)?;
+        self.records.insert(&key, &(current + 1).to_le_bytes())?;
+        Ok(())
+    }
+
+    /// Decrement collection counter
+    fn decrement_count(&self, collection: &str) -> Result<(), StorageError> {
+        let key = Self::count_key(collection);
+        let current = self.get_count_raw(&key)?;
+        if current > 0 {
+            self.records.insert(&key, &(current - 1).to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Get raw count value from key
+    fn get_count_raw(&self, key: &[u8]) -> Result<u64, StorageError> {
+        match self.records.get(key)? {
+            Some(bytes) if bytes.len() == 8 => {
+                let arr: [u8; 8] = bytes.as_ref().try_into().unwrap_or([0; 8]);
+                Ok(u64::from_le_bytes(arr))
+            }
+            _ => Ok(0),
+        }
+    }
+
+    /// Count records in a specific collection (O(1) using maintained counter)
     pub fn count_collection(&self, collection: &str) -> Result<usize, StorageError> {
-        // Use the ascending timestamp index - one entry per record, contiguous keys
+        let key = Self::count_key(collection);
+        Ok(self.get_count_raw(&key)? as usize)
+    }
+
+    /// Rebuild collection count by scanning the index (use during migration or if counts are wrong)
+    pub fn rebuild_count(&self, collection: &str) -> Result<usize, StorageError> {
         let prefix = format!("idx:a:__ts__:{}\0", collection);
-        Ok(self.records.prefix(prefix.as_bytes()).count())
+        let count = self.records.prefix(prefix.as_bytes()).count();
+        let key = Self::count_key(collection);
+        self.records.insert(&key, &(count as u64).to_le_bytes())?;
+        Ok(count)
     }
 
     pub fn unique_dids(&self) -> Result<Vec<String>, StorageError> {
@@ -629,10 +700,12 @@ impl Store {
             }
 
             if let Some(uri) = parse_uri_from_indexed_at_key(key_str) {
-                if let Ok(Some(record)) = self.get(&uri.parse().unwrap()) {
-                    results.push(record);
-                    if results.len() >= limit {
-                        break;
+                if let Ok(parsed_uri) = uri.parse() {
+                    if let Ok(Some(record)) = self.get(&parsed_uri) {
+                        results.push(record);
+                        if results.len() >= limit {
+                            break;
+                        }
                     }
                 }
             }

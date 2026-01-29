@@ -71,6 +71,25 @@ pub struct RepoStore {
 }
 
 impl RepoStore {
+    /// Key prefix for main repo data
+    const REPO_PREFIX: &'static [u8] = b"r:";
+    /// Key prefix for status index
+    const STATUS_PREFIX: &'static str = "s:";
+
+    fn repo_key(did: &str) -> Vec<u8> {
+        let mut key = Self::REPO_PREFIX.to_vec();
+        key.extend_from_slice(did.as_bytes());
+        key
+    }
+
+    fn status_key(status: RepoStatus, did: &str) -> Vec<u8> {
+        format!("{}{}:{}", Self::STATUS_PREFIX, status, did).into_bytes()
+    }
+
+    fn status_prefix(status: RepoStatus) -> Vec<u8> {
+        format!("{}{}:", Self::STATUS_PREFIX, status).into_bytes()
+    }
+
     #[cfg(test)]
     pub fn open(path: &Path) -> Result<Self, RepoError> {
         let db = Database::builder(path).open()?;
@@ -86,13 +105,26 @@ impl RepoStore {
     }
 
     pub fn put(&self, state: &RepoState) -> Result<(), RepoError> {
+        // Get old state to update status index
+        if let Some(old_state) = self.get(&state.did)? {
+            if old_state.status != state.status {
+                // Remove old status index entry
+                self.repos.remove(&Self::status_key(old_state.status, &state.did))?;
+            }
+        }
+
+        // Store the repo data
         let value = serde_json::to_vec(state)?;
-        self.repos.insert(state.did.as_bytes(), &value)?;
+        self.repos.insert(&Self::repo_key(&state.did), &value)?;
+
+        // Add status index entry (value is empty, just need the key for lookup)
+        self.repos.insert(&Self::status_key(state.status, &state.did), b"")?;
+
         Ok(())
     }
 
     pub fn get(&self, did: &str) -> Result<Option<RepoState>, RepoError> {
-        match self.repos.get(did.as_bytes())? {
+        match self.repos.get(&Self::repo_key(did))? {
             Some(bytes) => {
                 let state: RepoState = serde_json::from_slice(&bytes)?;
                 Ok(Some(state))
@@ -102,13 +134,17 @@ impl RepoStore {
     }
 
     pub fn delete(&self, did: &str) -> Result<(), RepoError> {
-        self.repos.remove(did.as_bytes())?;
+        // Remove status index entry if exists
+        if let Some(state) = self.get(did)? {
+            self.repos.remove(&Self::status_key(state.status, did))?;
+        }
+        self.repos.remove(&Self::repo_key(did))?;
         Ok(())
     }
 
     pub fn list(&self) -> Result<Vec<RepoState>, RepoError> {
         let mut results = Vec::new();
-        for item in self.repos.prefix(b"") {
+        for item in self.repos.prefix(Self::REPO_PREFIX) {
             let value = item.value()?;
             let state: RepoState = serde_json::from_slice(&value)?;
             results.push(state);
@@ -118,18 +154,23 @@ impl RepoStore {
 
     pub fn list_by_status(&self, status: RepoStatus) -> Result<Vec<RepoState>, RepoError> {
         let mut results = Vec::new();
-        for item in self.repos.prefix(b"") {
-            let value = item.value()?;
-            let state: RepoState = serde_json::from_slice(&value)?;
-            if state.status == status {
-                results.push(state);
+        let prefix = Self::status_prefix(status);
+
+        for item in self.repos.prefix(&prefix) {
+            // Extract DID from key: "s:{status}:{did}"
+            let key = item.key()?;
+            let key_str = String::from_utf8_lossy(&key);
+            if let Some(did) = key_str.strip_prefix(&format!("{}{}:", Self::STATUS_PREFIX, status)) {
+                if let Some(state) = self.get(did)? {
+                    results.push(state);
+                }
             }
         }
         Ok(results)
     }
 
     pub fn contains(&self, did: &str) -> Result<bool, RepoError> {
-        Ok(self.repos.contains_key(did.as_bytes())?)
+        Ok(self.repos.contains_key(&Self::repo_key(did))?)
     }
 }
 

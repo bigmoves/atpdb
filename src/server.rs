@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 
 type AppStateHandle = (Arc<AppState>, Arc<SyncHandle>);
@@ -129,21 +130,33 @@ fn hydrate_records(
     blobs: &std::collections::HashMap<String, String>,
     store: &crate::storage::Store,
 ) {
-    // Collect all DIDs and their hydration targets
-    let mut hydration_lookups: std::collections::HashMap<String, Vec<(usize, String)>> =
+    // Pre-parse hydration patterns to avoid repeated parsing
+    let parsed_patterns: Vec<(&str, &str, String, String)> = hydrate
+        .iter()
+        .filter_map(|(key, pattern)| {
+            parse_hydration_pattern(pattern).map(|(collection, rkey)| {
+                (key.as_str(), pattern.as_str(), collection, rkey)
+            })
+        })
+        .collect();
+
+    if parsed_patterns.is_empty() {
+        return;
+    }
+
+    // Collect all DIDs and their hydration targets using references
+    let mut hydration_lookups: std::collections::HashMap<String, Vec<(usize, &str)>> =
         std::collections::HashMap::new();
 
     for (idx, record) in records.iter().enumerate() {
         if let Some(uri) = record.get("uri").and_then(|u| u.as_str()) {
             if let Some(did) = extract_did_from_uri(uri) {
-                for (key, pattern) in hydrate {
-                    if let Some((collection, rkey)) = parse_hydration_pattern(pattern) {
-                        let target_uri = format!("at://{}/{}/{}", did, collection, rkey);
-                        hydration_lookups
-                            .entry(target_uri)
-                            .or_default()
-                            .push((idx, key.clone()));
-                    }
+                for (key, _, collection, rkey) in &parsed_patterns {
+                    let target_uri = format!("at://{}/{}/{}", did, collection, rkey);
+                    hydration_lookups
+                        .entry(target_uri)
+                        .or_default()
+                        .push((idx, *key));
                 }
             }
         }
@@ -165,7 +178,7 @@ fn hydrate_records(
 
                 // Transform blobs in hydrated record
                 for (path, preset) in blobs {
-                    for key in hydrate.keys() {
+                    for (key, _, _, _) in &parsed_patterns {
                         if let Some(sub_path) = path.strip_prefix(&format!("{}.", key)) {
                             transform_blob_at_path(&mut record_json, sub_path, &did, preset);
                         }
@@ -182,7 +195,7 @@ fn hydrate_records(
         if let Some(hydrated) = hydrated_records.get(&target_uri) {
             for (idx, key) in indices {
                 if let Some(record) = records.get_mut(idx) {
-                    record[&key] = hydrated.clone();
+                    record[key] = hydrated.clone();
                 }
             }
         }
@@ -321,8 +334,12 @@ pub struct ConfigUpdateRequest {
     collections: Option<Vec<String>>,
 }
 
-async fn health() -> &'static str {
-    "ok"
+async fn health(
+    State((app, _)): State<AppStateHandle>,
+) -> Result<&'static str, StatusCode> {
+    // Verify database is accessible by doing a simple count
+    app.store.count().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok("ok")
 }
 
 async fn stats(State((app, _)): State<AppStateHandle>) -> Result<Json<StatsResponse>, StatusCode> {
@@ -859,7 +876,28 @@ fn start_firehose(
                                     // Process if tracked
                                     app.repos.contains(did.as_str()).unwrap_or(false)
                                 }
-                                Mode::FullNetwork => true,
+                                Mode::FullNetwork => {
+                                    // Auto-sync new DIDs when we see them post to configured collections
+                                    let has_matching_collection = operations.iter().any(|op| {
+                                        match op {
+                                            Operation::Create { uri, .. } => {
+                                                matches_any_filter(uri.collection.as_str(), &config.collections)
+                                            }
+                                            Operation::Delete { uri } => {
+                                                matches_any_filter(uri.collection.as_str(), &config.collections)
+                                            }
+                                        }
+                                    });
+
+                                    if has_matching_collection && !app.repos.contains(did.as_str()).unwrap_or(false) {
+                                        let state = RepoState::new(did.to_string());
+                                        let _ = app.repos.put(&state);
+                                        let _ = sync_handle.queue_blocking(did.to_string());
+                                        eprintln!("Auto-syncing new DID: {}", did);
+                                    }
+
+                                    true
+                                }
                             };
 
                             if !should_process {
@@ -969,6 +1007,7 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
         .route("/repos/{did}", get(repos_get))
         .route("/config", get(config_get))
         .route("/config", post(config_update))
+        .layer(CompressionLayer::new())
         .layer(cors)
         .with_state(state);
 
@@ -976,7 +1015,39 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
     println!("Starting server on http://localhost:{}", port);
 
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, router).await.unwrap();
+
+    // Graceful shutdown on SIGTERM or SIGINT
+    let shutdown_signal = async {
+        let ctrl_c = async {
+            tokio::signal::ctrl_c()
+                .await
+                .expect("Failed to install Ctrl+C handler");
+        };
+
+        #[cfg(unix)]
+        let terminate = async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                .expect("Failed to install SIGTERM handler")
+                .recv()
+                .await;
+        };
+
+        #[cfg(not(unix))]
+        let terminate = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = ctrl_c => {},
+            _ = terminate => {},
+        }
+
+        println!("\nShutdown signal received, draining connections...");
+    };
+
+    axum::serve(listener, router)
+        .with_graceful_shutdown(shutdown_signal)
+        .await
+        .unwrap();
 
     running.store(false, Ordering::Relaxed);
+    println!("Server shutdown complete");
 }

@@ -5,9 +5,25 @@ use crate::types::AtUri;
 use repo_stream::DriverBuilder;
 use serde::Deserialize;
 use std::io::Cursor;
-use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+
+/// Timeout for repo fetch operations (5 minutes for large repos)
+const REPO_FETCH_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Shared HTTP client for connection pooling
+fn http_client() -> &'static reqwest::blocking::Client {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::blocking::Client::builder()
+            .timeout(REPO_FETCH_TIMEOUT)
+            .user_agent("atpdb/0.1")
+            .pool_max_idle_per_host(10)
+            .build()
+            .expect("Failed to create HTTP client")
+    })
+}
 
 pub struct SyncResult {
     pub record_count: usize,
@@ -52,8 +68,7 @@ fn resolve_pds(did: &str) -> Result<String, SyncError> {
         )));
     };
 
-    let client = reqwest::blocking::Client::new();
-    let doc: DidDocument = client.get(&url).send()?.json()?;
+    let doc: DidDocument = http_client().get(&url).send()?.json()?;
 
     doc.service
         .and_then(|services| {
@@ -78,8 +93,7 @@ pub fn sync_repo(
 
     println!("Fetching repo...");
     let url = format!("{}/xrpc/com.atproto.sync.getRepo?did={}", pds, did);
-    let client = reqwest::blocking::Client::new();
-    let response = client.get(&url).send()?;
+    let response = http_client().get(&url).send()?;
 
     if !response.status().is_success() {
         return Err(SyncError::Http(response.error_for_status().unwrap_err()));
@@ -108,7 +122,7 @@ async fn process_car(
     let indexes = indexes.to_vec();
 
     let driver = DriverBuilder::new()
-        .with_mem_limit_mb(100)
+        .with_mem_limit_mb(500)
         .with_block_processor(|data| data.to_vec())
         .load_car(cursor)
         .await

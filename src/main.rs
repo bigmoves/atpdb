@@ -68,6 +68,12 @@ fn handle_command(
             println!("  .index list               List configured indexes");
             println!("  .index rebuild <spec>     Rebuild index (col:field:type)");
             println!("  .index rebuild-all        Rebuild all configured indexes");
+            println!("  .index rebuild-ts <col>   Rebuild __ts__ index for collection");
+            println!();
+            println!("Counts:");
+            println!("  .count <collection>       Show collection count");
+            println!("  .count rebuild <col>      Rebuild count for collection");
+            println!("  .count rebuild-all        Rebuild counts for all collections");
             println!();
             println!("Queries:");
             println!("  at://did/collection/rkey   Get single record");
@@ -133,6 +139,68 @@ fn handle_command(
                     }
                 }
                 Err(e) => println!("Error: {}", e),
+            }
+            CommandResult::Continue
+        }
+
+        cmd if cmd.starts_with(".debug ") => {
+            let rest = cmd.strip_prefix(".debug ").unwrap().trim();
+            let parts: Vec<&str> = rest.split_whitespace().collect();
+
+            match parts.first().copied() {
+                Some("keys") => {
+                    let prefix = parts.get(1).copied().unwrap_or("");
+                    let limit: usize = parts.get(2).and_then(|s| s.parse().ok()).unwrap_or(20);
+
+                    println!("Keys with prefix '{}' (limit {}):", prefix, limit);
+                    let mut count = 0;
+                    for item in app.store.records_keyspace().prefix(prefix.as_bytes()) {
+                        if count >= limit {
+                            println!("  ... (more keys exist)");
+                            break;
+                        }
+                        if let Ok(key) = item.key() {
+                            let key_str = String::from_utf8_lossy(&key);
+                            println!("  {}", key_str);
+                        }
+                        count += 1;
+                    }
+                    println!("Showed {} keys", count);
+                }
+                Some("count") => {
+                    let prefix = parts.get(1).copied().unwrap_or("");
+                    let count = app.store.records_keyspace().prefix(prefix.as_bytes()).count();
+                    println!("Keys with prefix '{}': {}", prefix, count);
+                }
+                Some("get") => {
+                    if let Some(key) = parts.get(1) {
+                        match app.store.records_keyspace().get(key.as_bytes()) {
+                            Ok(Some(val)) => {
+                                // Try to parse as JSON
+                                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&val) {
+                                    println!("{}", serde_json::to_string_pretty(&json).unwrap());
+                                } else {
+                                    println!("Raw ({} bytes): {:?}", val.len(), String::from_utf8_lossy(&val));
+                                }
+                            }
+                            Ok(None) => println!("Key not found"),
+                            Err(e) => println!("Error: {}", e),
+                        }
+                    } else {
+                        println!("Usage: .debug get <key>");
+                    }
+                }
+                _ => {
+                    println!("Debug commands:");
+                    println!("  .debug keys [prefix] [limit]  List keys by prefix (default limit 20)");
+                    println!("  .debug count [prefix]         Count keys by prefix");
+                    println!("  .debug get <key>              Get value for exact key");
+                    println!();
+                    println!("Common prefixes:");
+                    println!("  at://                         Records");
+                    println!("  idx:                          Index entries");
+                    println!("  idx:a:__ts__:                 Timestamp indexes (for counts)");
+                }
             }
             CommandResult::Continue
         }
@@ -297,11 +365,68 @@ fn handle_command(
                         }
                     }
                 }
+                Some("rebuild-ts") => {
+                    if let Some(collection) = parts.get(1) {
+                        println!("Rebuilding __ts__ index for {}...", collection);
+                        match app.store.rebuild_indexed_at(collection) {
+                            Ok(count) => println!("Built __ts__ index with {} entries", count),
+                            Err(e) => println!("Error: {}", e),
+                        }
+                    } else {
+                        println!("Usage: .index rebuild-ts <collection>");
+                    }
+                }
                 _ => {
                     println!("Usage:");
                     println!("  .index list               List configured indexes");
                     println!("  .index rebuild <spec>     Rebuild index (col:field:type)");
                     println!("  .index rebuild-all        Rebuild all configured indexes");
+                }
+            }
+            CommandResult::Continue
+        }
+
+        cmd if cmd.starts_with(".count ") => {
+            let subcmd = cmd.strip_prefix(".count ").unwrap().trim();
+            let parts: Vec<&str> = subcmd.split_whitespace().collect();
+
+            match parts.first().copied() {
+                Some("rebuild") => {
+                    if let Some(collection) = parts.get(1) {
+                        println!("Rebuilding count for {}...", collection);
+                        match app.store.rebuild_count(collection) {
+                            Ok(count) => println!("Count rebuilt: {}", count),
+                            Err(e) => println!("Error: {}", e),
+                        }
+                    } else {
+                        println!("Usage: .count rebuild <collection>");
+                    }
+                }
+                Some("rebuild-all") => {
+                    match app.store.unique_collections() {
+                        Ok(collections) => {
+                            for collection in collections {
+                                print!("Rebuilding count for {}... ", collection);
+                                match app.store.rebuild_count(&collection) {
+                                    Ok(count) => println!("{}", count),
+                                    Err(e) => println!("Error: {}", e),
+                                }
+                            }
+                        }
+                        Err(e) => println!("Error: {}", e),
+                    }
+                }
+                Some(collection) => {
+                    match app.store.count_collection(collection) {
+                        Ok(count) => println!("{}: {}", collection, count),
+                        Err(e) => println!("Error: {}", e),
+                    }
+                }
+                None => {
+                    println!("Usage:");
+                    println!("  .count <collection>       Show collection count");
+                    println!("  .count rebuild <col>      Rebuild count for collection");
+                    println!("  .count rebuild-all        Rebuild counts for all collections");
                 }
             }
             CommandResult::Continue
@@ -400,8 +525,11 @@ fn handle_command(
                                 for mut repo in repos {
                                     repo.status = repos::RepoStatus::Pending;
                                     repo.error = None;
-                                    let _ = app.repos.put(&repo);
-                                    println!("Queued {} for resync", repo.did);
+                                    if let Err(e) = app.repos.put(&repo) {
+                                        eprintln!("Error updating {}: {}", repo.did, e);
+                                    } else {
+                                        println!("Queued {} for resync", repo.did);
+                                    }
                                 }
                             }
                             Err(e) => println!("Error: {}", e),
@@ -412,8 +540,11 @@ fn handle_command(
                             Ok(Some(mut state)) => {
                                 state.status = repos::RepoStatus::Pending;
                                 state.error = None;
-                                let _ = app.repos.put(&state);
-                                println!("Queued {} for resync", did);
+                                if let Err(e) = app.repos.put(&state) {
+                                    eprintln!("Error updating {}: {}", did, e);
+                                } else {
+                                    println!("Queued {} for resync", did);
+                                }
                             }
                             Ok(None) => println!("Repo not found"),
                             Err(e) => println!("Error: {}", e),

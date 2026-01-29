@@ -3,7 +3,7 @@ use crate::repos::{RepoError, RepoStore};
 use crate::storage::{StorageError, Store};
 use fjall::{Database, KeyspaceCreateOptions};
 use std::path::Path;
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -30,7 +30,9 @@ const CONFIG_KEY: &[u8] = b"config";
 
 impl AppState {
     pub fn open(path: &Path) -> Result<Self, AppError> {
+        let start = std::time::Instant::now();
         let db = Database::builder(path).open()?;
+        eprintln!("[startup] db open: {:?}", start.elapsed());
 
         let records = db.keyspace("records", KeyspaceCreateOptions::default)?;
         let repos_keyspace = db.keyspace("repos", KeyspaceCreateOptions::default)?;
@@ -45,67 +47,7 @@ impl AppState {
         config.apply_env_overrides();
 
         let store = Store::from_keyspace(records);
-
-        // Clean up indexes not in config
-        let configured_prefixes: std::collections::HashSet<String> = config
-            .indexes
-            .iter()
-            .map(|idx| {
-                let dir_char = match idx.direction {
-                    IndexDirection::Asc => 'a',
-                    IndexDirection::Desc => 'd',
-                };
-                format!("idx:{}:{}:{}\0", dir_char, idx.collection, idx.field)
-            })
-            .collect();
-
-        // Find and remove orphaned indexes (skip built-in __ts__ indexes for indexedAt)
-        for dir in ['a', 'd'] {
-            let scan_prefix = format!("idx:{}:", dir);
-            let builtin_ts_prefix = format!("idx:{}:__ts__:", dir);
-            let mut current_index_prefix: Option<String> = None;
-            let mut keys_to_delete: Vec<Vec<u8>> = Vec::new();
-
-            for item in store.records_keyspace().prefix(scan_prefix.as_bytes()) {
-                if let Ok(key) = item.key() {
-                    if let Ok(key_str) = std::str::from_utf8(&key) {
-                        // Skip built-in __ts__ indexes (used for indexedAt sorting)
-                        if key_str.starts_with(&builtin_ts_prefix) {
-                            continue;
-                        }
-
-                        // Extract prefix up to first \0
-                        if let Some(null_pos) = key_str.find('\0') {
-                            let prefix = format!("{}\0", &key_str[..null_pos]);
-
-                            // Check if this is a new prefix we haven't seen
-                            if current_index_prefix.as_ref() != Some(&prefix) {
-                                current_index_prefix = Some(prefix.clone());
-
-                                // If not in config, mark for deletion
-                                if !configured_prefixes.contains(&prefix) {
-                                    println!(
-                                        "Removing orphaned index: {}",
-                                        &prefix[..prefix.len() - 1]
-                                    );
-                                }
-                            }
-
-                            // If current prefix is orphaned, delete this key
-                            if let Some(ref p) = current_index_prefix {
-                                if !configured_prefixes.contains(p) {
-                                    keys_to_delete.push(key.to_vec());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            for key in keys_to_delete {
-                let _ = store.records_keyspace().remove(&key);
-            }
-        }
+        eprintln!("[startup] keyspaces ready: {:?}", start.elapsed());
 
         // Build missing indexes on startup
         for index in &config.indexes {
@@ -128,8 +70,7 @@ impl AppState {
 
             if needs_rebuild {
                 // Delete old index entries first (for this direction only)
-                let keys: Vec<_> = store
-                    .records_keyspace()
+                let keys: Vec<_> = store.records_keyspace()
                     .prefix(prefix.as_bytes())
                     .filter_map(|item| item.key().ok().map(|k| k.to_vec()))
                     .collect();
@@ -137,10 +78,7 @@ impl AppState {
                     let _ = store.records_keyspace().remove(&key);
                 }
 
-                println!(
-                    "Building index {}:{}:{}...",
-                    index.collection, index.field, index.direction
-                );
+                println!("Building index {}:{}:{}...", index.collection, index.field, index.direction);
                 match store.rebuild_index(index) {
                     Ok(count) => println!("Built index with {} entries", count),
                     Err(e) => eprintln!("Error building index: {}", e),
@@ -156,11 +94,7 @@ impl AppState {
                 continue;
             }
             let ts_prefix = format!("idx:a:__ts__:{}\0", collection);
-            let has_ts_index = store
-                .records_keyspace()
-                .prefix(ts_prefix.as_bytes())
-                .next()
-                .is_some();
+            let has_ts_index = store.records_keyspace().prefix(ts_prefix.as_bytes()).next().is_some();
 
             if !has_ts_index {
                 println!("Rebuilding __ts__ index for {}...", collection);
@@ -170,6 +104,8 @@ impl AppState {
                 }
             }
         }
+
+        eprintln!("[startup] indexes checked: {:?}", start.elapsed());
 
         Ok(AppState {
             store,
@@ -181,13 +117,14 @@ impl AppState {
     }
 
     pub fn config(&self) -> Config {
-        self.config.read().unwrap().clone()
+        self.config.read().clone()
     }
 
     pub fn set_config(&self, config: Config) -> Result<(), AppError> {
-        let value = serde_json::to_vec(&config).map_err(ConfigError::Serialization)?;
+        let value =
+            serde_json::to_vec(&config).map_err(ConfigError::Serialization)?;
         self.config_keyspace.insert(CONFIG_KEY, &value)?;
-        *self.config.write().unwrap() = config;
+        *self.config.write() = config;
         Ok(())
     }
 
@@ -209,8 +146,7 @@ impl AppState {
     }
 
     pub fn set_cursor(&self, key: &str, cursor: &str) -> Result<(), AppError> {
-        self.crawler_cursors
-            .insert(key.as_bytes(), cursor.as_bytes())?;
+        self.crawler_cursors.insert(key.as_bytes(), cursor.as_bytes())?;
         Ok(())
     }
 
