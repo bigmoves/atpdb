@@ -109,22 +109,22 @@ impl RepoStore {
         if let Some(old_state) = self.get(&state.did)? {
             if old_state.status != state.status {
                 // Remove old status index entry
-                self.repos.remove(&Self::status_key(old_state.status, &state.did))?;
+                self.repos.remove(Self::status_key(old_state.status, &state.did))?;
             }
         }
 
         // Store the repo data
         let value = serde_json::to_vec(state)?;
-        self.repos.insert(&Self::repo_key(&state.did), &value)?;
+        self.repos.insert(Self::repo_key(&state.did), &value)?;
 
         // Add status index entry (value is empty, just need the key for lookup)
-        self.repos.insert(&Self::status_key(state.status, &state.did), b"")?;
+        self.repos.insert(Self::status_key(state.status, &state.did), b"")?;
 
         Ok(())
     }
 
     pub fn get(&self, did: &str) -> Result<Option<RepoState>, RepoError> {
-        match self.repos.get(&Self::repo_key(did))? {
+        match self.repos.get(Self::repo_key(did))? {
             Some(bytes) => {
                 let state: RepoState = serde_json::from_slice(&bytes)?;
                 Ok(Some(state))
@@ -136,9 +136,9 @@ impl RepoStore {
     pub fn delete(&self, did: &str) -> Result<(), RepoError> {
         // Remove status index entry if exists
         if let Some(state) = self.get(did)? {
-            self.repos.remove(&Self::status_key(state.status, did))?;
+            self.repos.remove(Self::status_key(state.status, did))?;
         }
-        self.repos.remove(&Self::repo_key(did))?;
+        self.repos.remove(Self::repo_key(did))?;
         Ok(())
     }
 
@@ -170,7 +170,7 @@ impl RepoStore {
     }
 
     pub fn contains(&self, did: &str) -> Result<bool, RepoError> {
-        Ok(self.repos.contains_key(&Self::repo_key(did))?)
+        Ok(self.repos.contains_key(Self::repo_key(did))?)
     }
 }
 

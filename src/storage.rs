@@ -437,10 +437,10 @@ impl Store {
         limit: usize,
     ) -> Result<Vec<Record>, StorageError> {
         let prefix = format!("{}\0", collection);
-        let collection_path = format!("/{}/", collection.as_str());
+        let _collection_path = format!("/{}/", collection.as_str());
 
         // Parse cursor URI to get did and rkey for the start key
-        let start_key = if let Some(cursor_uri) = cursor {
+        let _start_key = if let Some(cursor_uri) = cursor {
             if let Ok(uri) = cursor_uri.parse::<AtUri>() {
                 Self::storage_key(collection.as_str(), uri.did.as_str(), uri.rkey.as_str())
             } else {
@@ -451,21 +451,31 @@ impl Store {
         };
 
         let mut results = Vec::new();
-        let mut skip_first = cursor.is_some();
+        let mut past_cursor = cursor.is_none(); // If no cursor, we're already past it
 
-        for item in self.records.range(start_key..) {
-            // Get value first (consumes item)
-            let value = item.value()?;
-            let record: Record = serde_json::from_slice(&value)?;
+        // Use prefix() to only iterate over keys starting with our collection
+        for item in self.records.prefix(prefix.as_bytes()) {
+            // Get value
+            let value = match item.value() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
 
-            // Check if still in collection by parsing URI
-            if !record.uri.contains(&collection_path) {
-                break;
+            // Skip empty values
+            if value.is_empty() {
+                continue;
             }
 
-            // Skip the cursor record itself
-            if skip_first {
-                skip_first = false;
+            let record: Record = match serde_json::from_slice(&value) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            // Skip records until we're past the cursor
+            if !past_cursor {
+                if cursor.is_some_and(|c| record.uri == c) {
+                    past_cursor = true; // Found cursor, skip it and start collecting after
+                }
                 continue;
             }
 
@@ -491,7 +501,7 @@ impl Store {
     fn increment_count(&self, collection: &str) -> Result<(), StorageError> {
         let key = Self::count_key(collection);
         let current = self.get_count_raw(&key)?;
-        self.records.insert(&key, &(current + 1).to_le_bytes())?;
+        self.records.insert(&key, (current + 1).to_le_bytes())?;
         Ok(())
     }
 
@@ -500,7 +510,7 @@ impl Store {
         let key = Self::count_key(collection);
         let current = self.get_count_raw(&key)?;
         if current > 0 {
-            self.records.insert(&key, &(current - 1).to_le_bytes())?;
+            self.records.insert(&key, (current - 1).to_le_bytes())?;
         }
         Ok(())
     }
@@ -527,7 +537,7 @@ impl Store {
         let prefix = format!("idx:a:__ts__:{}\0", collection);
         let count = self.records.prefix(prefix.as_bytes()).count();
         let key = Self::count_key(collection);
-        self.records.insert(&key, &(count as u64).to_le_bytes())?;
+        self.records.insert(&key, (count as u64).to_le_bytes())?;
         Ok(count)
     }
 

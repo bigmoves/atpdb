@@ -38,7 +38,29 @@
             margin-bottom: 24px;
             font-family: monospace;
             font-size: 0.875rem;
+        }
+        .query-box .query-uri {
             color: #14b8a6;
+            margin-bottom: 8px;
+        }
+        .query-box .query-params {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .query-box .query-chip {
+            background: #2a2a2a;
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 0.75rem;
+            color: #888;
+        }
+        .query-box .query-chip .chip-key {
+            color: #14b8a6;
+        }
+        .query-box .query-chip .chip-value {
+            color: #e0e0e0;
         }
         .stats {
             display: flex;
@@ -91,10 +113,40 @@
             overflow: hidden;
             text-overflow: ellipsis;
         }
+        .handle {
+            font-size: 0.75rem;
+            color: #14b8a6;
+        }
         .track-info {
             background: #0d0d0d;
             border-radius: 8px;
             padding: 12px;
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+        .album-art {
+            width: 64px;
+            height: 64px;
+            border-radius: 4px;
+            object-fit: cover;
+            flex-shrink: 0;
+        }
+        .album-art-placeholder {
+            width: 64px;
+            height: 64px;
+            border-radius: 4px;
+            background: linear-gradient(135deg, #1a1a1a, #2a2a2a);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            color: #444;
+            flex-shrink: 0;
+        }
+        .track-details {
+            flex: 1;
+            min-width: 0;
         }
         .track-name {
             font-weight: 600;
@@ -161,6 +213,50 @@
             outline: none;
             border-color: #14b8a6;
         }
+        .search-box {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .search-box input {
+            flex: 2;
+        }
+        select {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            color: #e0e0e0;
+            padding: 8px 12px;
+            border-radius: 6px;
+            cursor: pointer;
+        }
+        select:focus {
+            outline: none;
+            border-color: #14b8a6;
+        }
+        .search-result-info {
+            background: #1a2a1a;
+            border: 1px solid #2a4a2a;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .search-result-info .query {
+            color: #14b8a6;
+            font-family: monospace;
+        }
+        .search-result-info button {
+            background: #14b8a6;
+            color: #000;
+            font-size: 0.875rem;
+            padding: 6px 12px;
+            cursor: pointer;
+        }
+        .search-result-info button:hover {
+            background: #0d9488;
+        }
     </style>
 </head>
 <body>
@@ -171,6 +267,16 @@
         <div class="controls">
             <input type="text" id="api-url" value="http://localhost:3000" placeholder="API URL">
             <button onclick="loadFeed()">Refresh</button>
+        </div>
+
+        <div class="search-box">
+            <input type="text" id="search-input" placeholder="Search tracks, artists, albums..." onkeydown="if(event.key==='Enter')doSearch()">
+            <select id="search-field">
+                <option value="trackName">Track</option>
+                <option value="artists.*.artistName">Artist</option>
+                <option value="releaseName">Album</option>
+            </select>
+            <button onclick="doSearch()">Search</button>
         </div>
 
         <div class="query-box" id="query-display">
@@ -227,11 +333,13 @@
             const did = extractDidFromUri(record.uri);
             const value = record.value;
             const author = record.author;
+            const handle = record.handle;
 
             // fm.teal.alpha.feed.play structure
             const trackName = value.trackName || 'Unknown Track';
             const artistName = value.artists?.map(a => a.artistName).join(', ') || 'Unknown Artist';
             const albumName = value.releaseName || '';
+            const releaseMbId = value.releaseMbId;
 
             // Use hydrated profile data
             const displayName = author?.value?.displayName || truncateDid(did);
@@ -241,19 +349,31 @@
                 ? `<img src="${avatarUrl}" class="avatar" alt="${escapeHtml(displayName)}">`
                 : `<div class="avatar">${getInitials(did)}</div>`;
 
+            const handleHtml = handle
+                ? `<div class="handle">@${escapeHtml(handle)}</div>`
+                : `<div class="did">${did}</div>`;
+
+            // Album art from Cover Art Archive (with placeholder fallback)
+            const albumArtHtml = releaseMbId
+                ? `<img src="https://coverartarchive.org/release/${releaseMbId}/front-250" class="album-art" alt="${escapeHtml(albumName)}" onerror="this.outerHTML='<div class=\\'album-art-placeholder\\'>♪</div>'">`
+                : '<div class="album-art-placeholder">♪</div>';
+
             return `
                 <div class="play-card">
                     <div class="play-header">
                         ${avatarHtml}
                         <div>
                             <div class="display-name">${escapeHtml(displayName)}</div>
-                            <div class="did">${did}</div>
+                            ${handleHtml}
                         </div>
                     </div>
                     <div class="track-info">
-                        <div class="track-name">${escapeHtml(trackName)}</div>
-                        <div class="track-artist">${escapeHtml(artistName)}</div>
-                        ${albumName ? `<div class="track-album">${escapeHtml(albumName)}</div>` : ''}
+                        ${albumArtHtml}
+                        <div class="track-details">
+                            <div class="track-name">${escapeHtml(trackName)}</div>
+                            <div class="track-artist">${escapeHtml(artistName)}</div>
+                            ${albumName ? `<div class="track-album">${escapeHtml(albumName)}</div>` : ''}
+                        </div>
                     </div>
                     <div class="timestamp">${value.playedTime ? new Date(value.playedTime).toLocaleString() : formatTime(record.indexedAt)}</div>
                 </div>
@@ -264,6 +384,20 @@
             const div = document.createElement('div');
             div.textContent = str;
             return div.innerHTML;
+        }
+
+        function buildQueryDisplayHtml(baseUri, params) {
+            // Build a visual display with chips for each parameter
+            const chips = [];
+            for (const [key, value] of Object.entries(params)) {
+                if (value !== undefined && value !== null) {
+                    chips.push(`<span class="query-chip"><span class="chip-key">${escapeHtml(key)}</span>: <span class="chip-value">${escapeHtml(value)}</span></span>`);
+                }
+            }
+            const paramsHtml = chips.length > 0
+                ? `<div class="query-params">${chips.join('')}</div>`
+                : '';
+            return `<div class="query-uri">${escapeHtml(baseUri)}</div>${paramsHtml}`;
         }
 
         async function loadFeed() {
@@ -297,26 +431,38 @@
             const statsEl = document.getElementById('record-count');
             const timeEl = document.getElementById('query-time');
             const loadMoreContainer = document.getElementById('load-more-container');
+            const queryDisplay = document.getElementById('query-display');
             const apiUrl = document.getElementById('api-url').value;
 
             const startTime = performance.now();
+            const baseUri = 'at://*/fm.teal.alpha.feed.play/*';
 
             try {
                 const body = {
-                    q: 'at://*/fm.teal.alpha.feed.play/*',
+                    q: baseUri,
                     limit: PAGE_SIZE,
-                    sort: 'value.playedTime:datetime:desc',
+                    sort: 'playedTime:datetime:desc',
                     hydrate: {
                         author: 'at://$.did/app.bsky.actor.profile/self'
                     },
                     blobs: {
-                        'author.value.avatar': 'avatar'
+                        'author.avatar': 'avatar'
                     },
-                    include_count: isFirstPage  // Only fetch count on first page
+                    include_count: isFirstPage
                 };
-                // Include cursor for pagination (now works with sorting via indexes)
                 if (currentCursor) {
                     body.cursor = currentCursor;
+                }
+
+                // Update query display on first page
+                if (isFirstPage) {
+                    queryDisplay.innerHTML = buildQueryDisplayHtml(baseUri, {
+                        limit: body.limit,
+                        sort: body.sort,
+                        'hydrate.author': body.hydrate.author,
+                        'blobs.author.avatar': body.blobs['author.avatar'],
+                        include_count: body.include_count
+                    });
                 }
 
                 const response = await fetch(`${apiUrl}/query`, {
@@ -379,6 +525,104 @@
                 timeEl.textContent = '';
                 loadMoreContainer.style.display = 'none';
             }
+        }
+
+        let isSearchMode = false;
+
+        async function doSearch() {
+            const searchInput = document.getElementById('search-input');
+            const searchField = document.getElementById('search-field');
+            const query = searchInput.value.trim();
+
+            if (!query) {
+                return;
+            }
+
+            isSearchMode = true;
+            const feedEl = document.getElementById('feed');
+            const statsEl = document.getElementById('record-count');
+            const timeEl = document.getElementById('query-time');
+            const loadMoreContainer = document.getElementById('load-more-container');
+            const queryDisplay = document.getElementById('query-display');
+            const apiUrl = document.getElementById('api-url').value;
+
+            feedEl.innerHTML = '<div class="loading">Searching...</div>';
+            loadMoreContainer.style.display = 'none';
+
+            const fieldName = searchField.value;
+            const fieldLabel = searchField.options[searchField.selectedIndex].text;
+            const baseUri = 'at://*/fm.teal.alpha.feed.play/*';
+
+            // Update query display with chips and clear button
+            queryDisplay.innerHTML = `
+                ${buildQueryDisplayHtml(baseUri, {
+                    [`search.${fieldName}`]: query,
+                    limit: 50,
+                    'hydrate.author': 'at://$.did/app.bsky.actor.profile/self',
+                    'blobs.author.avatar': 'avatar'
+                })}
+                <div style="margin-top: 8px;">
+                    <button onclick="clearSearch()">Clear Search</button>
+                </div>
+            `;
+
+            const startTime = performance.now();
+
+            try {
+                const body = {
+                    q: baseUri,
+                    [`search.${fieldName}`]: query,
+                    limit: 50,
+                    hydrate: {
+                        author: 'at://$.did/app.bsky.actor.profile/self'
+                    },
+                    blobs: {
+                        'author.avatar': 'avatar'
+                    }
+                };
+
+                const response = await fetch(`${apiUrl}/query`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                const endTime = performance.now();
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Search failed');
+                }
+
+                const data = await response.json();
+
+                statsEl.textContent = `${data.total || data.records.length} results`;
+                timeEl.textContent = `(${(endTime - startTime).toFixed(0)}ms)`;
+
+                if (data.records.length === 0) {
+                    feedEl.innerHTML = `<div class="loading">No results found for "${escapeHtml(query)}"</div>`;
+                    return;
+                }
+
+                feedEl.innerHTML = data.records.map(renderPlay).join('');
+
+            } catch (err) {
+                feedEl.innerHTML = `<div class="error">
+                    <strong>Search Error:</strong> ${escapeHtml(err.message)}<br><br>
+                    Make sure search is configured: <code>ATPDB_SEARCH_FIELDS=fm.teal.alpha.feed.play:trackName,fm.teal.alpha.feed.play:releaseName,fm.teal.alpha.feed.play:artists.*.artistName</code>
+                </div>`;
+                statsEl.textContent = 'Error';
+                timeEl.textContent = '';
+            }
+        }
+
+        function clearSearch() {
+            isSearchMode = false;
+            document.getElementById('search-input').value = '';
+            document.getElementById('query-display').innerHTML = 'at://*/fm.teal.alpha.feed.play/*';
+            loadFeed();
         }
 
         // Load on page load

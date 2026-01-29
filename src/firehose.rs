@@ -38,6 +38,11 @@ pub enum Event {
         rev: String,
         operations: Vec<Operation>,
     },
+    Identity {
+        seq: i64,
+        did: Did,
+        handle: Option<String>,
+    },
     Unknown {
         seq: Option<i64>,
     },
@@ -57,6 +62,7 @@ pub enum Operation {
 
 #[derive(Debug, Deserialize)]
 struct Header {
+    #[allow(dead_code)]
     op: i32,
     t: Option<String>,
 }
@@ -69,6 +75,13 @@ struct CommitBody {
     ops: Vec<RepoOp>,
     #[serde(with = "serde_bytes")]
     blocks: Vec<u8>,
+}
+
+#[derive(Debug, Deserialize)]
+struct IdentityBody {
+    seq: i64,
+    did: String,
+    handle: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -155,9 +168,24 @@ impl FirehoseClient {
         let header: Header =
             ciborium::from_reader(&mut cursor).map_err(|e| FirehoseError::Cbor(e.to_string()))?;
 
-        // Only handle commits (op=1, t="#commit")
-        if header.op != 1 || header.t.as_deref() != Some("#commit") {
-            return Ok(Some(Event::Unknown { seq: None }));
+        // Handle different event types
+        match header.t.as_deref() {
+            Some("#identity") => {
+                let body: IdentityBody = ciborium::from_reader(&mut cursor)
+                    .map_err(|e| FirehoseError::Cbor(e.to_string()))?;
+                let did: Did = body.did.parse().map_err(|_| FirehoseError::InvalidMessage)?;
+                return Ok(Some(Event::Identity {
+                    seq: body.seq,
+                    did,
+                    handle: body.handle,
+                }));
+            }
+            Some("#commit") => {
+                // Continue to commit handling below
+            }
+            _ => {
+                return Ok(Some(Event::Unknown { seq: None }));
+            }
         }
 
         // Decode commit body

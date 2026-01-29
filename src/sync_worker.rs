@@ -79,13 +79,17 @@ async fn sync_one_repo(app: &AppState, did: &str) {
 
     let config = app.config();
     let store = Arc::new(app.store.clone());
+    let search = app.search.clone();
 
     // Run sync in blocking task
     let did_owned = did.to_string();
     let collections = config.collections.clone();
     let indexes = config.indexes.clone();
+    let search_fields = config.search_fields.clone();
 
-    let result = tokio::task::spawn_blocking(move || sync_repo(&did_owned, &store, &collections, &indexes))
+    let result = tokio::task::spawn_blocking(move || {
+        sync_repo(&did_owned, &store, &collections, &indexes, search.as_ref(), &search_fields)
+    })
         .await;
 
     // Update state based on result

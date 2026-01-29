@@ -1,5 +1,6 @@
 use crate::config::{Config, ConfigError, IndexDirection};
 use crate::repos::{RepoError, RepoStore};
+use crate::search::SearchIndex;
 use crate::storage::{StorageError, Store};
 use fjall::{Database, KeyspaceCreateOptions};
 use std::path::Path;
@@ -22,9 +23,11 @@ pub struct AppState {
     db: Database,
     pub store: Store,
     pub repos: RepoStore,
+    pub search: Option<SearchIndex>,
     config: RwLock<Config>,
     config_keyspace: fjall::Keyspace,
     crawler_cursors: fjall::Keyspace,
+    handles: fjall::Keyspace,
 }
 
 const CONFIG_KEY: &[u8] = b"config";
@@ -39,6 +42,7 @@ impl AppState {
         let repos_keyspace = db.keyspace("repos", KeyspaceCreateOptions::default)?;
         let config_keyspace = db.keyspace("config", KeyspaceCreateOptions::default)?;
         let crawler_cursors = db.keyspace("crawler_cursors", KeyspaceCreateOptions::default)?;
+        let handles = db.keyspace("handles", KeyspaceCreateOptions::default)?;
 
         // Load config or use default, then apply env overrides
         let mut config: Config = match config_keyspace.get(CONFIG_KEY)? {
@@ -108,19 +112,41 @@ impl AppState {
 
         eprintln!("[startup] indexes checked: {:?}", start.elapsed());
 
+        // Initialize search index
+        let search_path = path.join("search");
+        let search = match SearchIndex::open(&search_path) {
+            Ok(idx) => {
+                eprintln!("[startup] search index opened at {:?}", search_path);
+                Some(idx)
+            }
+            Err(e) => {
+                eprintln!("[startup] warning: failed to open search index: {}. Search disabled.", e);
+                None
+            }
+        };
+
         Ok(AppState {
             db,
             store,
             repos: RepoStore::from_keyspace(repos_keyspace),
+            search,
             config: RwLock::new(config),
             config_keyspace,
             crawler_cursors,
+            handles,
         })
     }
 
     /// Flush all pending writes to disk
     pub fn flush(&self) -> Result<(), AppError> {
         self.db.persist(fjall::PersistMode::SyncAll)?;
+        if let Some(ref search) = self.search {
+            search.commit().map_err(|e| {
+                AppError::Fjall(fjall::Error::Io(std::io::Error::other(
+                    e.to_string(),
+                )))
+            })?;
+        }
         Ok(())
     }
 
@@ -140,9 +166,36 @@ impl AppState {
     where
         F: FnOnce(&mut Config),
     {
+        let old_search_fields = self.config().search_fields.clone();
         let mut config = self.config();
         f(&mut config);
-        self.set_config(config)
+
+        // Check for new search fields
+        let new_fields: Vec<_> = config
+            .search_fields
+            .iter()
+            .filter(|sf| !old_search_fields.contains(sf))
+            .cloned()
+            .collect();
+
+        self.set_config(config)?;
+
+        // Trigger background reindex for new fields
+        if !new_fields.is_empty() {
+            if let Some(ref search) = self.search {
+                let search = search.clone();
+                let store = self.store.clone();
+                std::thread::spawn(move || {
+                    eprintln!("Auto-reindexing {} new search field(s)...", new_fields.len());
+                    match search.reindex_from_store(&store, &new_fields) {
+                        Ok(count) => eprintln!("Auto-reindexed {} records", count),
+                        Err(e) => eprintln!("Auto-reindex error: {}", e),
+                    }
+                });
+            }
+        }
+
+        Ok(())
     }
 
     pub fn get_cursor(&self, key: &str) -> Option<String> {
@@ -168,6 +221,21 @@ impl AppState {
     pub fn set_firehose_cursor(&self, relay: &str, seq: i64) -> Result<(), AppError> {
         let key = format!("firehose:{}", relay);
         self.set_cursor(&key, &seq.to_string())
+    }
+
+    /// Get handle for a DID
+    pub fn get_handle(&self, did: &str) -> Option<String> {
+        self.handles
+            .get(did.as_bytes())
+            .ok()
+            .flatten()
+            .and_then(|b| String::from_utf8(b.to_vec()).ok())
+    }
+
+    /// Set handle for a DID
+    pub fn set_handle(&self, did: &str, handle: &str) -> Result<(), AppError> {
+        self.handles.insert(did.as_bytes(), handle.as_bytes())?;
+        Ok(())
     }
 
     pub fn list_cursors(&self) -> Result<Vec<(String, String)>, AppError> {

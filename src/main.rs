@@ -6,6 +6,7 @@ mod firehose;
 mod indexer;
 mod query;
 mod repos;
+mod search;
 mod server;
 mod storage;
 mod sync;
@@ -29,6 +30,46 @@ enum CommandResult {
     Continue,
     Exit,
     StartStreaming(String),
+}
+
+/// Fetch handle for a DID from PLC directory or did:web endpoint
+fn fetch_handle_from_plc(did: &str) -> Result<Option<String>, String> {
+    let url = if let Some(domain) = did.strip_prefix("did:web:") {
+        // did:web DIDs: fetch from https://{domain}/.well-known/did.json
+        let domain = domain.replace("%3A", ":").replace("%2F", "/");
+        format!("https://{}/.well-known/did.json", domain)
+    } else {
+        // did:plc DIDs: fetch from PLC directory
+        format!("https://plc.directory/{}", did)
+    };
+
+    let client = reqwest::blocking::Client::new();
+    let response = client
+        .get(&url)
+        .send()
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+
+    let body: serde_json::Value = response
+        .json()
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+
+    // Extract handle from alsoKnownAs field
+    // Format: ["at://handle.example.com"]
+    if let Some(also_known_as) = body.get("alsoKnownAs").and_then(|v| v.as_array()) {
+        for aka in also_known_as {
+            if let Some(s) = aka.as_str() {
+                if let Some(handle) = s.strip_prefix("at://") {
+                    return Ok(Some(handle.to_string()));
+                }
+            }
+        }
+    }
+
+    Ok(None)
 }
 
 fn handle_command(
@@ -63,12 +104,22 @@ fn handle_command(
             println!("  .config collections <..>  Set collection filters");
             println!("  .config relay <hostname>  Set relay hostname");
             println!("  .config indexes <...>     Set indexes (col:field:type,...)");
+            println!("  .config search list       List search fields");
+            println!("  .config search add <...>  Add search field (col:field)");
+            println!("  .config search remove <.> Remove search field (col:field)");
             println!();
             println!("Indexes:");
             println!("  .index list               List configured indexes");
             println!("  .index rebuild <spec>     Rebuild index (col:field:type)");
             println!("  .index rebuild-all        Rebuild all configured indexes");
             println!("  .index rebuild-ts <col>   Rebuild __ts__ index for collection");
+            println!();
+            println!("Search:");
+            println!("  .reindex search           Reindex all records for search");
+            println!();
+            println!("Handles:");
+            println!("  .handles sync             Fetch handles for all known DIDs from PLC directory");
+            println!("  .handles get <did>        Get handle for a specific DID");
             println!();
             println!("Counts:");
             println!("  .count <collection>       Show collection count");
@@ -312,6 +363,69 @@ fn handle_command(
                         println!("Indexes set to: {}", idx_strs.join(", "));
                     }
                 }
+                "search" => {
+                    if parts.len() < 2 {
+                        println!("Usage: .config search <list|add|remove> [collection:field]");
+                        return CommandResult::Continue;
+                    }
+                    let search_parts: Vec<&str> = parts[1].splitn(2, ' ').collect();
+                    match search_parts[0] {
+                        "list" => {
+                            let config = app.config();
+                            if config.search_fields.is_empty() {
+                                println!("No search fields configured");
+                            } else {
+                                println!("Search fields:");
+                                for sf in &config.search_fields {
+                                    println!("  {}:{}", sf.collection, sf.field);
+                                }
+                            }
+                        }
+                        "add" => {
+                            if search_parts.len() < 2 {
+                                println!("Usage: .config search add collection:field");
+                                return CommandResult::Continue;
+                            }
+                            let spec = search_parts[1].trim();
+                            if let Some(sf) = config::SearchFieldConfig::parse(spec) {
+                                if let Err(e) = app.update_config(|c| {
+                                    if !c.search_fields.contains(&sf) {
+                                        c.search_fields.push(sf.clone());
+                                    }
+                                }) {
+                                    println!("Error: {}", e);
+                                } else {
+                                    println!("Added search field: {}", spec);
+                                    println!("Note: Run .reindex search to index existing records");
+                                }
+                            } else {
+                                println!("Invalid format. Use: .config search add collection:field");
+                            }
+                        }
+                        "remove" => {
+                            if search_parts.len() < 2 {
+                                println!("Usage: .config search remove collection:field");
+                                return CommandResult::Continue;
+                            }
+                            let spec = search_parts[1].trim();
+                            if let Some(sf) = config::SearchFieldConfig::parse(spec) {
+                                if let Err(e) = app.update_config(|c| {
+                                    c.search_fields.retain(|s| s != &sf);
+                                }) {
+                                    println!("Error: {}", e);
+                                } else {
+                                    println!("Removed search field: {}", spec);
+                                }
+                            } else {
+                                println!("Invalid format. Use: .config search remove collection:field");
+                            }
+                        }
+                        _ => {
+                            println!("Unknown search subcommand: {}", search_parts[0]);
+                            println!("Usage: .config search <list|add|remove> [collection:field]");
+                        }
+                    }
+                }
                 _ => {
                     println!("Unknown config key: {}", parts[0]);
                 }
@@ -381,6 +495,79 @@ fn handle_command(
                     println!("  .index list               List configured indexes");
                     println!("  .index rebuild <spec>     Rebuild index (col:field:type)");
                     println!("  .index rebuild-all        Rebuild all configured indexes");
+                }
+            }
+            CommandResult::Continue
+        }
+
+        ".reindex search" => {
+            if let Some(ref search) = app.search {
+                let config = app.config();
+                println!("Reindexing search fields...");
+                match search.reindex_from_store(&app.store, &config.search_fields) {
+                    Ok(count) => println!("Reindexed {} records", count),
+                    Err(e) => eprintln!("Reindex error: {}", e),
+                }
+            } else {
+                println!("Search is not enabled");
+            }
+            CommandResult::Continue
+        }
+
+        cmd if cmd.starts_with(".handles") => {
+            let subcmd = cmd.strip_prefix(".handles").unwrap().trim();
+
+            match subcmd {
+                "sync" => {
+                    println!("Fetching handles from PLC directory...");
+                    let mut count = 0;
+                    let mut errors = 0;
+
+                    // Get all DIDs from repos
+                    let dids: Vec<String> = app.repos.list()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|r| r.did.clone())
+                        .collect();
+
+                    println!("Found {} DIDs to look up", dids.len());
+
+                    for did in &dids {
+                        match fetch_handle_from_plc(did) {
+                            Ok(Some(handle)) => {
+                                if let Err(e) = app.set_handle(did, &handle) {
+                                    eprintln!("Error storing handle for {}: {}", did, e);
+                                    errors += 1;
+                                } else {
+                                    count += 1;
+                                    if count % 100 == 0 {
+                                        println!("  fetched {} handles...", count);
+                                    }
+                                }
+                            }
+                            Ok(None) => {
+                                // No handle found (tombstoned or missing)
+                            }
+                            Err(e) => {
+                                eprintln!("Error fetching {}: {}", did, e);
+                                errors += 1;
+                            }
+                        }
+                        // Small delay to be nice to PLC directory
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+
+                    println!("Done. Fetched {} handles, {} errors", count, errors);
+                }
+                _ if subcmd.starts_with("get ") => {
+                    let did = subcmd.strip_prefix("get ").unwrap().trim();
+                    match app.get_handle(did) {
+                        Some(handle) => println!("{} -> {}", did, handle),
+                        None => println!("No handle stored for {}", did),
+                    }
+                }
+                _ => {
+                    println!("Unknown handles command. Use: .handles sync | .handles get <did>");
                 }
             }
             CommandResult::Continue
@@ -582,7 +769,7 @@ fn handle_command(
                 let start = std::time::Instant::now();
                 let store = Arc::new(app.store.clone());
                 let config = app.config();
-                match sync::sync_repo(did, &store, &config.collections, &config.indexes) {
+                match sync::sync_repo(did, &store, &config.collections, &config.indexes, app.search.as_ref(), &config.search_fields) {
                     Ok(result) => {
                         let elapsed = start.elapsed();
                         println!("Synced {} records ({:.2?})", result.record_count, elapsed);
@@ -647,7 +834,7 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                         })) => {
                             last_seq = seq;
                             event_count += 1;
-                            if event_count % 1000 == 0 {
+                            if event_count.is_multiple_of(1000) {
                                 let _ = app.set_firehose_cursor(&relay, seq);
                             }
                             for op in operations {
@@ -666,13 +853,38 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                                         if let Err(e) = app.store.put_with_indexes(&uri, &record, &config.indexes) {
                                             eprintln!("Storage error: {}", e);
                                         }
+                                        // Index for search
+                                        if let Some(ref search) = app.search {
+                                            if let Err(e) = search.index_record(
+                                                &uri.to_string(),
+                                                uri.collection.as_str(),
+                                                &record.value,
+                                                &config.search_fields,
+                                            ) {
+                                                eprintln!("Search index error: {}", e);
+                                            }
+                                        }
                                     }
                                     Operation::Delete { uri } => {
                                         let config = app.config();
                                         if let Err(e) = app.store.delete_with_indexes(&uri, &config.indexes) {
                                             eprintln!("Storage error: {}", e);
                                         }
+                                        // Remove from search index
+                                        if let Some(ref search) = app.search {
+                                            if let Err(e) = search.delete_record(&uri.to_string()) {
+                                                eprintln!("Search delete error: {}", e);
+                                            }
+                                        }
                                     }
+                                }
+                            }
+                        }
+                        Ok(Some(Event::Identity { seq, did, handle })) => {
+                            last_seq = seq;
+                            if let Some(h) = handle {
+                                if let Err(e) = app.set_handle(did.as_str(), &h) {
+                                    eprintln!("Handle update error: {}", e);
                                 }
                             }
                         }

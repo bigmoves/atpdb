@@ -16,6 +16,7 @@ use axum::{
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -71,6 +72,46 @@ fn extract_did_from_uri(uri: &str) -> Option<String> {
         .map(|s| s.to_string())
 }
 
+/// Parse an AT URI that may contain query string params
+/// e.g. "at://*/collection/*?search.trackName=value&sort=field:type:desc"
+/// Returns (base_uri, params)
+fn parse_query_uri(uri: &str) -> (String, HashMap<String, String>) {
+    let mut params = HashMap::new();
+
+    // Split on '?' to separate base URI from query string
+    let (base, query_string) = match uri.split_once('?') {
+        Some((base, qs)) => (base.to_string(), Some(qs)),
+        None => (uri.to_string(), None),
+    };
+
+    // Parse query string params
+    if let Some(qs) = query_string {
+        for pair in qs.split('&') {
+            if let Some((key, value)) = pair.split_once('=') {
+                // URL decode the value
+                let decoded = urlencoding::decode(value).unwrap_or_else(|_| value.into());
+                params.insert(key.to_string(), decoded.into_owned());
+            }
+        }
+    }
+
+    (base, params)
+}
+
+/// Normalize a field path - adds "value." prefix unless it's a known top-level field
+fn normalize_field_path(field: &str) -> String {
+    const TOP_LEVEL_FIELDS: &[&str] = &["indexedAt", "uri", "cid", "did", "handle"];
+
+    // Don't add prefix if it's a top-level field or already has value. prefix
+    if TOP_LEVEL_FIELDS.contains(&field.split(':').next().unwrap_or(field))
+        || field.starts_with("value.")
+    {
+        field.to_string()
+    } else {
+        format!("value.{}", field)
+    }
+}
+
 /// Parse hydration pattern like "at://$.did/app.bsky.actor.profile/self"
 /// Returns (collection, rkey) if pattern uses $.did
 fn parse_hydration_pattern(pattern: &str) -> Option<(String, String)> {
@@ -100,6 +141,32 @@ fn transform_blob(blob: &mut serde_json::Value, did: &str, preset: &str) {
     }
 }
 
+/// Build a record JSON object with did and handle
+fn build_record_json(
+    uri: &str,
+    cid: &str,
+    value: serde_json::Value,
+    indexed_at: u64,
+    app: &AppState,
+) -> serde_json::Value {
+    let did = extract_did_from_uri(uri).unwrap_or_default();
+    let handle = app.get_handle(&did);
+
+    let mut record = serde_json::json!({
+        "uri": uri,
+        "did": did,
+        "cid": cid,
+        "value": value,
+        "indexedAt": indexed_at
+    });
+
+    if let Some(h) = handle {
+        record["handle"] = serde_json::Value::String(h);
+    }
+
+    record
+}
+
 /// Walk a JSON value at a dot-separated path and transform blob if found
 fn transform_blob_at_path(value: &mut serde_json::Value, path: &str, did: &str, preset: &str) {
     let parts: Vec<&str> = path.split('.').collect();
@@ -126,10 +193,11 @@ fn transform_blob_at_path(value: &mut serde_json::Value, path: &str, did: &str, 
 /// Hydrate records with related data
 fn hydrate_records(
     records: &mut [serde_json::Value],
-    hydrate: &std::collections::HashMap<String, String>,
-    blobs: &std::collections::HashMap<String, String>,
-    store: &crate::storage::Store,
+    hydrate: &HashMap<String, String>,
+    blobs: &HashMap<String, String>,
+    app: &AppState,
 ) {
+    let store = &app.store;
     // Pre-parse hydration patterns to avoid repeated parsing
     let parsed_patterns: Vec<(&str, &str, String, String)> = hydrate
         .iter()
@@ -145,8 +213,8 @@ fn hydrate_records(
     }
 
     // Collect all DIDs and their hydration targets using references
-    let mut hydration_lookups: std::collections::HashMap<String, Vec<(usize, &str)>> =
-        std::collections::HashMap::new();
+    let mut hydration_lookups: HashMap<String, Vec<(usize, &str)>> =
+        HashMap::new();
 
     for (idx, record) in records.iter().enumerate() {
         if let Some(uri) = record.get("uri").and_then(|u| u.as_str()) {
@@ -163,24 +231,31 @@ fn hydrate_records(
     }
 
     // Parallel lookup all hydration targets
-    let hydrated_records: std::collections::HashMap<String, serde_json::Value> = hydration_lookups
+    let hydrated_records: HashMap<String, serde_json::Value> = hydration_lookups
         .keys()
         .par_bridge()
         .filter_map(|target_uri| {
             store.get_by_uri_string(target_uri).ok().flatten().map(|record| {
-                let did = extract_did_from_uri(target_uri).unwrap_or_default();
-                let mut record_json = serde_json::json!({
-                    "uri": record.uri,
-                    "cid": record.cid,
-                    "value": record.value,
-                    "indexedAt": record.indexed_at
-                });
+                let mut record_json = build_record_json(
+                    &record.uri,
+                    &record.cid,
+                    record.value,
+                    record.indexed_at,
+                    app,
+                );
 
                 // Transform blobs in hydrated record
+                let did = extract_did_from_uri(target_uri).unwrap_or_default();
                 for (path, preset) in blobs {
                     for (key, _, _, _) in &parsed_patterns {
                         if let Some(sub_path) = path.strip_prefix(&format!("{}.", key)) {
-                            transform_blob_at_path(&mut record_json, sub_path, &did, preset);
+                            // Normalize: add value. prefix if not already present
+                            let normalized = if sub_path.starts_with("value.") {
+                                sub_path.to_string()
+                            } else {
+                                format!("value.{}", sub_path)
+                            };
+                            transform_blob_at_path(&mut record_json, &normalized, &did, preset);
                         }
                     }
                 }
@@ -204,7 +279,10 @@ fn hydrate_records(
 
 #[derive(Deserialize)]
 pub struct QueryRequest {
-    q: String,
+    #[serde(default)]
+    q: Option<String>, // Made optional - can use collection shorthand instead
+    #[serde(default)]
+    collection: Option<String>, // Shorthand: expands to at://*/collection/*
     #[serde(default)]
     cursor: Option<String>,
     #[serde(default)]
@@ -212,11 +290,13 @@ pub struct QueryRequest {
     #[serde(default)]
     sort: Option<String>, // e.g. "indexedAt:desc", "indexedAt:asc"
     #[serde(default)]
-    hydrate: std::collections::HashMap<String, String>, // key -> "at://$.did/collection/rkey"
+    hydrate: HashMap<String, String>, // key -> "at://$.did/collection/rkey"
     #[serde(default)]
-    blobs: std::collections::HashMap<String, String>, // path -> preset (avatar, banner, feed_thumbnail)
+    blobs: HashMap<String, String>, // path -> preset (avatar, banner, feed_thumbnail)
     #[serde(default)]
     include_count: bool,
+    #[serde(flatten)]
+    search_fields: HashMap<String, serde_json::Value>, // Captures search.* fields
 }
 
 #[derive(Serialize)]
@@ -255,7 +335,6 @@ pub struct SyncRequest {
 pub struct SyncResponse {
     synced: usize,
 }
-
 // Repos types
 #[derive(Deserialize)]
 pub struct ReposAddRequest {
@@ -325,6 +404,7 @@ pub struct ConfigResponse {
     collections: Vec<String>,
     relay: String,
     sync_parallelism: u32,
+    search_fields: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -332,6 +412,7 @@ pub struct ConfigUpdateRequest {
     mode: Option<String>,
     signal_collection: Option<String>,
     collections: Option<Vec<String>>,
+    search_fields: Option<Vec<String>>,
 }
 
 async fn health(
@@ -361,11 +442,41 @@ async fn stats(State((app, _)): State<AppStateHandle>) -> Result<Json<StatsRespo
     }))
 }
 
+/// Extract search.* fields from the flattened map
+fn extract_search_fields(
+    fields: &HashMap<String, serde_json::Value>,
+) -> HashMap<String, String> {
+    fields
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix("search.")
+                .and_then(|field| v.as_str().map(|query| (field.to_string(), query.to_string())))
+        })
+        .collect()
+}
+
 async fn query_handler(
     State((app, _)): State<AppStateHandle>,
     Json(payload): Json<QueryRequest>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let parsed = Query::parse(&payload.q).map_err(|e| {
+    // Resolve query: use q if provided, otherwise expand collection shorthand
+    let raw_query = match (&payload.q, &payload.collection) {
+        (Some(q), _) => q.clone(),
+        (None, Some(collection)) => format!("at://*/{}/*", collection),
+        (None, None) => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "Either 'q' or 'collection' is required".to_string(),
+                }),
+            ));
+        }
+    };
+
+    // Parse query string params from the URI (e.g., at://...?search.field=value&sort=...)
+    let (base_uri, uri_params) = parse_query_uri(&raw_query);
+
+    let parsed = Query::parse(&base_uri).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -374,14 +485,69 @@ async fn query_handler(
         )
     })?;
 
+    // Merge sort: JSON field takes precedence over URI param
+    // Normalize field path (adds value. prefix unless it's a top-level field)
+    let sort = payload
+        .sort
+        .clone()
+        .or_else(|| uri_params.get("sort").cloned())
+        .map(|s| {
+            // Parse sort spec: field:type:direction
+            let parts: Vec<&str> = s.split(':').collect();
+            if parts.is_empty() {
+                return s;
+            }
+            let normalized_field = normalize_field_path(parts[0]);
+            let rest: Vec<&str> = parts.into_iter().skip(1).collect();
+            if rest.is_empty() {
+                normalized_field
+            } else {
+                format!("{}:{}", normalized_field, rest.join(":"))
+            }
+        });
+
+    // Merge hydrate: JSON field takes precedence, then check URI params for hydrate.*
+    let mut hydrate = payload.hydrate.clone();
+    for (key, value) in &uri_params {
+        if let Some(field) = key.strip_prefix("hydrate.") {
+            hydrate.entry(field.to_string()).or_insert_with(|| value.clone());
+        }
+    }
+
     let limit = payload
         .limit
         .unwrap_or(DEFAULT_QUERY_LIMIT)
         .min(MAX_QUERY_LIMIT);
     let config = app.config();
 
+    // Extract search fields from JSON body
+    let mut search_fields = extract_search_fields(&payload.search_fields);
+
+    // Merge search fields from URI params (JSON takes precedence)
+    for (key, value) in &uri_params {
+        if let Some(field) = key.strip_prefix("search.") {
+            search_fields
+                .entry(field.to_string())
+                .or_insert_with(|| value.clone());
+        }
+    }
+
+    // If search fields present, use Tantivy search
+    if !search_fields.is_empty() {
+        return execute_search_query(
+            &app,
+            &parsed,
+            &search_fields,
+            limit,
+            sort.as_deref(),
+            &hydrate,
+            &payload.blobs,
+        )
+        .await;
+    }
+
     // Handle sorted queries using indexes
-    if let Some(ref sort) = payload.sort {
+    if let Some(ref sort) = sort {
         let parts: Vec<&str> = sort.split(':').collect();
         let field = parts.first().unwrap_or(&"indexedAt");
         // field_type is declared in sort spec but not used for index lookup
@@ -404,7 +570,7 @@ async fn query_handler(
                     &parsed,
                     limit,
                     payload.cursor.as_deref(),
-                    &payload.hydrate,
+                    &hydrate,
                     &payload.blobs,
                     payload.include_count,
                 )
@@ -487,19 +653,12 @@ async fn query_handler(
 
         let mut values: Vec<serde_json::Value> = records
             .into_iter()
-            .map(|r| {
-                serde_json::json!({
-                    "uri": r.uri,
-                    "cid": r.cid,
-                    "value": r.value,
-                    "indexedAt": r.indexed_at
-                })
-            })
+            .map(|r| build_record_json(&r.uri, &r.cid, r.value, r.indexed_at, &app))
             .collect();
 
         // Apply hydration if requested
-        if !payload.hydrate.is_empty() || !payload.blobs.is_empty() {
-            hydrate_records(&mut values, &payload.hydrate, &payload.blobs, &app.store);
+        if !hydrate.is_empty() || !payload.blobs.is_empty() {
+            hydrate_records(&mut values, &hydrate, &payload.blobs, &app);
         }
 
         // Get count if requested
@@ -522,7 +681,7 @@ async fn query_handler(
         &parsed,
         limit,
         payload.cursor.as_deref(),
-        &payload.hydrate,
+        &hydrate,
         &payload.blobs,
         payload.include_count,
     )
@@ -534,8 +693,8 @@ async fn execute_unsorted_query(
     parsed: &Query,
     limit: usize,
     cursor: Option<&str>,
-    hydrate: &std::collections::HashMap<String, String>,
-    blobs: &std::collections::HashMap<String, String>,
+    hydrate: &HashMap<String, String>,
+    blobs: &HashMap<String, String>,
     include_count: bool,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let records = query::execute_paginated(parsed, &app.store, cursor, limit + 1).map_err(|e| {
@@ -558,19 +717,12 @@ async fn execute_unsorted_query(
 
     let mut values: Vec<serde_json::Value> = records
         .into_iter()
-        .map(|r| {
-            serde_json::json!({
-                "uri": r.uri,
-                "cid": r.cid,
-                "value": r.value,
-                "indexedAt": r.indexed_at
-            })
-        })
+        .map(|r| build_record_json(&r.uri, &r.cid, r.value, r.indexed_at, app))
         .collect();
 
     // Apply hydration if requested
     if !hydrate.is_empty() || !blobs.is_empty() {
-        hydrate_records(&mut values, hydrate, blobs, &app.store);
+        hydrate_records(&mut values, hydrate, blobs, app);
     }
 
     // Get count if requested
@@ -591,6 +743,165 @@ async fn execute_unsorted_query(
     }))
 }
 
+async fn execute_search_query(
+    app: &AppState,
+    parsed: &Query,
+    search_fields: &HashMap<String, String>,
+    limit: usize,
+    sort: Option<&str>,
+    hydrate: &HashMap<String, String>,
+    blobs: &HashMap<String, String>,
+) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let search = app.search.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ErrorResponse {
+                error: "Search is not enabled. Set ATPDB_SEARCH_FIELDS to enable search indexing.".to_string(),
+            }),
+        )
+    })?;
+
+    let config = app.config();
+
+    // Get collection from query
+    let collection = match parsed {
+        Query::AllCollection { collection } => collection.as_str(),
+        Query::Collection { collection, .. } => collection.as_str(),
+        Query::Exact(uri) => uri.collection.as_str(),
+    };
+
+    // Overfetch when sorting to ensure enough records after re-ranking
+    let fetch_limit = if sort.is_some() {
+        (limit * 3).min(MAX_QUERY_LIMIT)
+    } else {
+        limit
+    };
+
+    // Search each field and collect URIs
+    let mut uris: Vec<String> = Vec::new();
+    for (field, query) in search_fields {
+        // Verify field is configured
+        if !config.is_field_searchable(collection, field) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: format!(
+                        "Field '{}' is not searchable for collection '{}'. Configure ATPDB_SEARCH_FIELDS={}:{}",
+                        field, collection, collection, field
+                    ),
+                }),
+            ));
+        }
+
+        let results = search
+            .search(collection, field, query, fetch_limit, 0)
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse {
+                        error: e.to_string(),
+                    }),
+                )
+            })?;
+
+        uris.extend(results);
+    }
+
+    // Deduplicate URIs while preserving relevance order
+    let mut seen = HashSet::new();
+    uris.retain(|uri| seen.insert(uri.clone()));
+    if sort.is_none() {
+        uris.truncate(limit);
+    }
+
+    // Hydrate records from Fjall
+    let mut records: Vec<serde_json::Value> = Vec::with_capacity(uris.len());
+    for uri in &uris {
+        if let Ok(Some(record)) = app.store.get_by_uri_string(uri) {
+            let mut record_json = build_record_json(
+                &record.uri,
+                &record.cid,
+                record.value,
+                record.indexed_at,
+                app,
+            );
+
+            // Transform blobs on main record (single-segment paths only)
+            // Multi-segment paths like "author.avatar" are handled by hydrate_records
+            let did = extract_did_from_uri(uri).unwrap_or_default();
+            for (path, preset) in blobs {
+                // Only process single-segment paths here (no dots)
+                // Paths with dots are hydration paths handled later
+                if !path.contains('.') {
+                    let normalized = format!("value.{}", path);
+                    transform_blob_at_path(&mut record_json, &normalized, &did, preset);
+                }
+            }
+
+            records.push(record_json);
+        }
+    }
+
+    // Sort records if requested
+    if let Some(sort_spec) = sort {
+        let parts: Vec<&str> = sort_spec.split(':').collect();
+        let field_path = parts.first().unwrap_or(&"indexedAt");
+        let field_type = parts.get(1).unwrap_or(&"string");
+        let order = parts.get(2).unwrap_or(&"desc");
+        let descending = *order != "asc";
+
+        records.sort_by(|a, b| {
+            let val_a = get_json_field(a, field_path);
+            let val_b = get_json_field(b, field_path);
+
+            let cmp = match *field_type {
+                "datetime" => {
+                    let time_a = val_a
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+                    let time_b = val_b
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
+                    time_a.cmp(&time_b)
+                }
+                "number" => {
+                    let num_a = val_a.and_then(|v| v.as_f64());
+                    let num_b = val_b.and_then(|v| v.as_f64());
+                    num_a.partial_cmp(&num_b).unwrap_or(std::cmp::Ordering::Equal)
+                }
+                _ => {
+                    let str_a = val_a.and_then(|v| v.as_str()).unwrap_or("");
+                    let str_b = val_b.and_then(|v| v.as_str()).unwrap_or("");
+                    str_a.cmp(str_b)
+                }
+            };
+
+            if descending {
+                cmp.reverse()
+            } else {
+                cmp
+            }
+        });
+
+        records.truncate(limit);
+    }
+
+    // Apply hydration if requested (also handles multi-segment blob paths)
+    if !hydrate.is_empty() || !blobs.is_empty() {
+        hydrate_records(&mut records, hydrate, blobs, app);
+    }
+
+    let total = records.len();
+
+    Ok(Json(QueryResponse {
+        records,
+        // Note: Search results don't support cursor pagination.
+        // Use limit/offset pattern or implement cursor support for search.
+        cursor: None,
+        total: Some(total),
+    }))
+}
+
 async fn sync_handler(
     State((app, _)): State<AppStateHandle>,
     Json(payload): Json<SyncRequest>,
@@ -599,7 +910,11 @@ async fn sync_handler(
     let config = app.config();
     let collections = config.collections.clone();
     let indexes = config.indexes.clone();
-    let result = tokio::task::spawn_blocking(move || sync::sync_repo(&payload.did, &store, &collections, &indexes))
+    let search = app.search.clone();
+    let search_fields = config.search_fields.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        sync::sync_repo(&payload.did, &store, &collections, &indexes, search.as_ref(), &search_fields)
+    })
         .await
         .map_err(|e| {
             (
@@ -621,6 +936,15 @@ async fn sync_handler(
             }),
         )),
     }
+}
+
+/// Get a nested field from a JSON value using dot notation (e.g., "value.playedTime")
+fn get_json_field<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    Some(current)
 }
 
 // Repos handlers
@@ -775,12 +1099,18 @@ async fn config_get(
     State((app, _)): State<AppStateHandle>,
 ) -> Result<Json<ConfigResponse>, (StatusCode, Json<ErrorResponse>)> {
     let config = app.config();
+    let search_fields: Vec<String> = config
+        .search_fields
+        .iter()
+        .map(|sf| sf.to_config_string())
+        .collect();
     Ok(Json(ConfigResponse {
         mode: config.mode.to_string(),
         signal_collection: config.signal_collection,
         collections: config.collections,
         relay: config.relay,
         sync_parallelism: config.sync_parallelism,
+        search_fields,
     }))
 }
 
@@ -803,6 +1133,12 @@ async fn config_update(
         if let Some(collections) = payload.collections.clone() {
             config.collections = collections;
         }
+        if let Some(search_fields_strs) = payload.search_fields.clone() {
+            config.search_fields = search_fields_strs
+                .iter()
+                .filter_map(|s| crate::config::SearchFieldConfig::parse(s))
+                .collect();
+        }
     })
     .map_err(|e| {
         (
@@ -814,12 +1150,18 @@ async fn config_update(
     })?;
 
     let config = app.config();
+    let search_fields: Vec<String> = config
+        .search_fields
+        .iter()
+        .map(|sf| sf.to_config_string())
+        .collect();
     Ok(Json(ConfigResponse {
         mode: config.mode.to_string(),
         signal_collection: config.signal_collection,
         collections: config.collections,
         relay: config.relay,
         sync_parallelism: config.sync_parallelism,
+        search_fields,
     }))
 }
 
@@ -856,7 +1198,7 @@ fn start_firehose(
                             event_count += 1;
 
                             // Save cursor every 1000 events
-                            if event_count % 1000 == 0 {
+                            if event_count.is_multiple_of(1000) {
                                 let _ = app.set_firehose_cursor(&relay, seq);
                             }
                             let config = app.config();
@@ -949,6 +1291,17 @@ fn start_firehose(
                                         if let Err(e) = app.store.put_with_indexes(&uri, &record, &config.indexes) {
                                             eprintln!("Storage error: {}", e);
                                         }
+                                        // Index for search
+                                        if let Some(ref search) = app.search {
+                                            if let Err(e) = search.index_record(
+                                                &uri.to_string(),
+                                                uri.collection.as_str(),
+                                                &record.value,
+                                                &config.search_fields,
+                                            ) {
+                                                eprintln!("Search index error: {}", e);
+                                            }
+                                        }
                                     }
                                     Operation::Delete { uri } => {
                                         if !matches_any_filter(
@@ -960,7 +1313,21 @@ fn start_firehose(
                                         if let Err(e) = app.store.delete_with_indexes(&uri, &config.indexes) {
                                             eprintln!("Storage error: {}", e);
                                         }
+                                        // Remove from search index
+                                        if let Some(ref search) = app.search {
+                                            if let Err(e) = search.delete_record(&uri.to_string()) {
+                                                eprintln!("Search delete error: {}", e);
+                                            }
+                                        }
                                     }
+                                }
+                            }
+                        }
+                        Ok(Some(Event::Identity { seq, did, handle })) => {
+                            last_seq = seq;
+                            if let Some(h) = handle {
+                                if let Err(e) = app.set_handle(did.as_str(), &h) {
+                                    eprintln!("Handle update error: {}", e);
                                 }
                             }
                         }

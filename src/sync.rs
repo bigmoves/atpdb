@@ -1,5 +1,6 @@
 use crate::cbor::dagcbor_to_json;
-use crate::config::{matches_any_filter, IndexConfig};
+use crate::config::{matches_any_filter, IndexConfig, SearchFieldConfig};
+use crate::search::SearchIndex;
 use crate::storage::{Record, Store};
 use crate::types::AtUri;
 use repo_stream::DriverBuilder;
@@ -86,6 +87,8 @@ pub fn sync_repo(
     store: &Arc<Store>,
     collections: &[String],
     indexes: &[IndexConfig],
+    search: Option<&SearchIndex>,
+    search_fields: &[SearchFieldConfig],
 ) -> Result<SyncResult, SyncError> {
     println!("Resolving DID...");
     let pds = resolve_pds(did)?;
@@ -103,7 +106,7 @@ pub fn sync_repo(
     println!("Downloaded {} bytes", car_bytes.len());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(process_car(&car_bytes, did, store, collections, indexes))?;
+    let result = rt.block_on(process_car(&car_bytes, did, store, collections, indexes, search, search_fields))?;
 
     Ok(result)
 }
@@ -114,12 +117,15 @@ async fn process_car(
     store: &Arc<Store>,
     collections: &[String],
     indexes: &[IndexConfig],
+    search: Option<&SearchIndex>,
+    search_fields: &[SearchFieldConfig],
 ) -> Result<SyncResult, SyncError> {
     let cursor = Cursor::new(car_bytes);
     let did = did.to_string();
     let store = Arc::clone(store);
     let collections = collections.to_vec();
     let indexes = indexes.to_vec();
+    let search_fields = search_fields.to_vec();
 
     let driver = DriverBuilder::new()
         .with_mem_limit_mb(500)
@@ -169,6 +175,10 @@ async fn process_car(
                                             .as_secs(),
                                     };
                                     if store.put_with_indexes(&uri, &record, &indexes).is_ok() {
+                                        // Index for search
+                                        if let Some(search) = search {
+                                            let _ = search.index_record(&record.uri, collection, &record.value, &search_fields);
+                                        }
                                         count += 1;
                                     }
                                 }

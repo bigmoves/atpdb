@@ -70,6 +70,31 @@ impl std::fmt::Display for IndexFieldType {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SearchFieldConfig {
+    pub collection: String,
+    pub field: String,
+}
+
+impl SearchFieldConfig {
+    /// Parse from string format: "collection:field"
+    pub fn parse(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.splitn(2, ':').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        Some(SearchFieldConfig {
+            collection: parts[0].to_string(),
+            field: parts[1].to_string(),
+        })
+    }
+
+    /// Format as string: "collection:field"
+    pub fn to_config_string(&self) -> String {
+        format!("{}:{}", self.collection, self.field)
+    }
+}
+
 impl IndexConfig {
     /// Parse from string format: "collection:field:type[:direction]"
     /// Direction is optional, defaults to "desc"
@@ -115,6 +140,8 @@ pub struct Config {
     pub sync_parallelism: u32,
     #[serde(default)]
     pub indexes: Vec<IndexConfig>,
+    #[serde(default)]
+    pub search_fields: Vec<SearchFieldConfig>,
 }
 
 impl Default for Config {
@@ -126,6 +153,7 @@ impl Default for Config {
             relay: "bsky.network".to_string(),
             sync_parallelism: 3,
             indexes: Vec::new(),
+            search_fields: Vec::new(),
         }
     }
 }
@@ -166,6 +194,13 @@ impl Config {
                 .filter_map(|s| IndexConfig::parse(s.trim()))
                 .collect();
         }
+
+        if let Ok(search_str) = std::env::var("ATPDB_SEARCH_FIELDS") {
+            self.search_fields = search_str
+                .split(',')
+                .filter_map(|s| SearchFieldConfig::parse(s.trim()))
+                .collect();
+        }
     }
 
     pub fn is_field_indexed(&self, collection: &str, field: &str, direction: IndexDirection) -> bool {
@@ -174,6 +209,11 @@ impl Config {
             .any(|idx| idx.collection == collection && idx.field == field && idx.direction == direction)
     }
 
+    pub fn is_field_searchable(&self, collection: &str, field: &str) -> bool {
+        self.search_fields
+            .iter()
+            .any(|sf| sf.collection == collection && sf.field == field)
+    }
 }
 
 /// Check if a collection matches a filter pattern
@@ -231,10 +271,12 @@ mod tests {
         assert_eq!(config.mode, Mode::Manual);
 
         // Update and read back
-        let mut config = Config::default();
-        config.mode = Mode::Signal;
-        config.signal_collection = Some("fm.teal.alpha.feed".to_string());
-        config.collections = vec!["fm.teal.*".to_string()];
+        let config = Config {
+            mode: Mode::Signal,
+            signal_collection: Some("fm.teal.alpha.feed".to_string()),
+            collections: vec!["fm.teal.*".to_string()],
+            ..Default::default()
+        };
         let value = serde_json::to_vec(&config).unwrap();
         partition.insert(CONFIG_KEY, &value).unwrap();
 
@@ -285,5 +327,29 @@ mod tests {
 
         // Empty filters match all
         assert!(matches_any_filter("anything", &[]));
+    }
+
+    #[test]
+    fn test_search_field_config_parse() {
+        let config = SearchFieldConfig::parse("app.bsky.feed.post:text").unwrap();
+        assert_eq!(config.collection, "app.bsky.feed.post");
+        assert_eq!(config.field, "text");
+
+        // Nested field
+        let config2 = SearchFieldConfig::parse("app.bsky.actor.profile:description").unwrap();
+        assert_eq!(config2.collection, "app.bsky.actor.profile");
+        assert_eq!(config2.field, "description");
+
+        // Invalid format
+        assert!(SearchFieldConfig::parse("invalid").is_none());
+    }
+
+    #[test]
+    fn test_search_field_config_to_string() {
+        let config = SearchFieldConfig {
+            collection: "app.bsky.feed.post".to_string(),
+            field: "text".to_string(),
+        };
+        assert_eq!(config.to_config_string(), "app.bsky.feed.post:text");
     }
 }
