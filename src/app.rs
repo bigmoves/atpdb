@@ -19,6 +19,7 @@ pub enum AppError {
 }
 
 pub struct AppState {
+    db: Database,
     pub store: Store,
     pub repos: RepoStore,
     config: RwLock<Config>,
@@ -108,12 +109,19 @@ impl AppState {
         eprintln!("[startup] indexes checked: {:?}", start.elapsed());
 
         Ok(AppState {
+            db,
             store,
             repos: RepoStore::from_keyspace(repos_keyspace),
             config: RwLock::new(config),
             config_keyspace,
             crawler_cursors,
         })
+    }
+
+    /// Flush all pending writes to disk
+    pub fn flush(&self) -> Result<(), AppError> {
+        self.db.persist(fjall::PersistMode::SyncAll)?;
+        Ok(())
     }
 
     pub fn config(&self) -> Config {
@@ -148,6 +156,18 @@ impl AppState {
     pub fn set_cursor(&self, key: &str, cursor: &str) -> Result<(), AppError> {
         self.crawler_cursors.insert(key.as_bytes(), cursor.as_bytes())?;
         Ok(())
+    }
+
+    /// Get firehose cursor for a relay
+    pub fn get_firehose_cursor(&self, relay: &str) -> Option<i64> {
+        let key = format!("firehose:{}", relay);
+        self.get_cursor(&key).and_then(|s| s.parse().ok())
+    }
+
+    /// Set firehose cursor for a relay
+    pub fn set_firehose_cursor(&self, relay: &str, seq: i64) -> Result<(), AppError> {
+        let key = format!("firehose:{}", relay);
+        self.set_cursor(&key, &seq.to_string())
     }
 
     pub fn list_cursors(&self) -> Result<Vec<(String, String)>, AppError> {

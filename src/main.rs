@@ -626,17 +626,30 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
     running.store(true, Ordering::Relaxed);
 
     thread::spawn(move || {
-        match FirehoseClient::connect(&relay) {
+        // Load cursor for recovery
+        let cursor = app.get_firehose_cursor(&relay);
+        if let Some(seq) = cursor {
+            println!("Resuming from cursor: {}", seq);
+        }
+
+        match FirehoseClient::connect(&relay, cursor) {
             Ok(mut client) => {
                 println!("Connected to {}", relay);
+                let mut last_seq: i64 = cursor.unwrap_or(0);
+                let mut event_count: u64 = 0;
 
                 while running.load(Ordering::Relaxed) {
                     match client.next_event() {
                         Ok(Some(Event::Commit {
-                            did: _,
-                            rev: _,
+                            seq,
                             operations,
+                            ..
                         })) => {
+                            last_seq = seq;
+                            event_count += 1;
+                            if event_count % 1000 == 0 {
+                                let _ = app.set_firehose_cursor(&relay, seq);
+                            }
                             for op in operations {
                                 match op {
                                     Operation::Create { uri, cid, value } => {
@@ -663,16 +676,22 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                                 }
                             }
                         }
-                        Ok(Some(Event::Unknown)) => {}
+                        Ok(Some(Event::Unknown { .. })) => {}
                         Ok(None) => {
-                            println!("Connection closed");
-                            break;
+                            // Timeout - continue to check running flag
+                            continue;
                         }
                         Err(e) => {
                             eprintln!("Firehose error: {}", e);
                             break;
                         }
                     }
+                }
+
+                // Save cursor on exit
+                if last_seq > 0 {
+                    let _ = app.set_firehose_cursor(&relay, last_seq);
+                    println!("Saved cursor: {}", last_seq);
                 }
             }
             Err(e) => {

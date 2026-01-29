@@ -832,17 +832,33 @@ fn start_firehose(
     running.store(true, Ordering::Relaxed);
 
     std::thread::spawn(move || {
-        match FirehoseClient::connect(&relay) {
+        // Load cursor from previous session (allows 72hr recovery)
+        let cursor = app.get_firehose_cursor(&relay);
+        if let Some(seq) = cursor {
+            println!("Resuming firehose from cursor: {}", seq);
+        }
+
+        match FirehoseClient::connect(&relay, cursor) {
             Ok(mut client) => {
                 println!("Connected to firehose: {}", relay);
+                let mut event_count: u64 = 0;
+                let mut last_seq: i64 = cursor.unwrap_or(0);
 
                 while running.load(Ordering::Relaxed) {
                     match client.next_event() {
                         Ok(Some(Event::Commit {
+                            seq,
                             did,
                             rev,
                             operations,
                         })) => {
+                            last_seq = seq;
+                            event_count += 1;
+
+                            // Save cursor every 1000 events
+                            if event_count % 1000 == 0 {
+                                let _ = app.set_firehose_cursor(&relay, seq);
+                            }
                             let config = app.config();
 
                             // Check if we should process this repo based on mode
@@ -948,16 +964,26 @@ fn start_firehose(
                                 }
                             }
                         }
-                        Ok(Some(Event::Unknown)) => {}
+                        Ok(Some(Event::Unknown { seq })) => {
+                            if let Some(s) = seq {
+                                last_seq = s;
+                            }
+                        }
                         Ok(None) => {
-                            println!("Firehose connection closed");
-                            break;
+                            // Timeout or connection closed - continue to check running flag
+                            continue;
                         }
                         Err(e) => {
                             eprintln!("Firehose error: {}", e);
                             break;
                         }
                     }
+                }
+
+                // Save final cursor on exit
+                if last_seq > 0 {
+                    let _ = app.set_firehose_cursor(&relay, last_seq);
+                    println!("Saved firehose cursor: {}", last_seq);
                 }
             }
             Err(e) => {
@@ -992,6 +1018,7 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    let app_for_shutdown = Arc::clone(&app);
     let state: AppStateHandle = (app, sync_handle);
 
     let router = Router::new()
@@ -1049,5 +1076,13 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
         .unwrap();
 
     running.store(false, Ordering::Relaxed);
+
+    // Flush database to ensure all writes are persisted
+    if let Err(e) = app_for_shutdown.flush() {
+        eprintln!("Warning: failed to flush database: {}", e);
+    } else {
+        println!("Database flushed");
+    }
+
     println!("Server shutdown complete");
 }

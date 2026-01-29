@@ -2,6 +2,7 @@ use crate::cbor::dagcbor_to_json;
 use crate::types::{AtUri, Did};
 use serde::Deserialize;
 use std::io::Cursor;
+use std::time::Duration;
 use thiserror::Error;
 use tungstenite::{connect, Message};
 
@@ -32,11 +33,14 @@ pub enum FirehoseError {
 #[derive(Debug)]
 pub enum Event {
     Commit {
+        seq: i64,
         did: Did,
         rev: String,
         operations: Vec<Operation>,
     },
-    Unknown,
+    Unknown {
+        seq: Option<i64>,
+    },
 }
 
 #[derive(Debug)]
@@ -59,6 +63,7 @@ struct Header {
 
 #[derive(Debug, Deserialize)]
 struct CommitBody {
+    seq: i64,
     repo: String,
     rev: String,
     ops: Vec<RepoOp>,
@@ -108,23 +113,37 @@ pub struct FirehoseClient {
 }
 
 impl FirehoseClient {
-    pub fn connect(relay: &str) -> Result<Self, FirehoseError> {
+    pub fn connect(relay: &str, cursor: Option<i64>) -> Result<Self, FirehoseError> {
         let base = to_websocket_url(relay);
-        let url = format!("{}/xrpc/com.atproto.sync.subscribeRepos", base.trim_end_matches('/'));
+        let url = match cursor {
+            Some(seq) => format!("{}/xrpc/com.atproto.sync.subscribeRepos?cursor={}", base.trim_end_matches('/'), seq),
+            None => format!("{}/xrpc/com.atproto.sync.subscribeRepos", base.trim_end_matches('/')),
+        };
         let (socket, _response) = connect(&url).map_err(Box::new)?;
+
+        // Set read timeout so we can check shutdown flag periodically
+        if let tungstenite::stream::MaybeTlsStream::NativeTls(ref stream) = socket.get_ref() {
+            let _ = stream.get_ref().set_read_timeout(Some(Duration::from_secs(1)));
+        } else if let tungstenite::stream::MaybeTlsStream::Plain(ref stream) = socket.get_ref() {
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
+        }
+
         Ok(FirehoseClient { socket })
     }
 
     pub fn next_event(&mut self) -> Result<Option<Event>, FirehoseError> {
         loop {
-            let msg = self.socket.read().map_err(Box::new)?;
-
-            match msg {
-                Message::Binary(data) => {
+            match self.socket.read() {
+                Ok(Message::Binary(data)) => {
                     return self.decode_message(&data);
                 }
-                Message::Close(_) => return Ok(None),
-                _ => continue,
+                Ok(Message::Close(_)) => return Ok(None),
+                Ok(_) => continue,
+                Err(tungstenite::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                    // Timeout - return None to let caller check shutdown flag
+                    return Ok(None);
+                }
+                Err(e) => return Err(Box::new(e).into()),
             }
         }
     }
@@ -138,7 +157,7 @@ impl FirehoseClient {
 
         // Only handle commits (op=1, t="#commit")
         if header.op != 1 || header.t.as_deref() != Some("#commit") {
-            return Ok(Some(Event::Unknown));
+            return Ok(Some(Event::Unknown { seq: None }));
         }
 
         // Decode commit body
@@ -185,6 +204,7 @@ impl FirehoseClient {
         }
 
         Ok(Some(Event::Commit {
+            seq: body.seq,
             did,
             rev: body.rev,
             operations,
