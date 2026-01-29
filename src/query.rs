@@ -17,6 +17,7 @@ pub enum Query {
     Exact(AtUri),
     Collection { did: Did, collection: Nsid },
     AllCollection { collection: Nsid },
+    AllForDid { did: Did },
 }
 
 impl Query {
@@ -30,33 +31,70 @@ impl Query {
         let without_scheme = &input[5..]; // Remove "at://"
         let parts: Vec<&str> = without_scheme.splitn(3, '/').collect();
 
-        if parts.len() != 3 {
-            return Err(QueryError::Invalid(
-                "expected did/collection/rkey".to_string(),
-            ));
-        }
-
-        let did_str = parts[0];
-        let collection: Nsid = parts[1].parse()?;
-        let rkey = parts[2];
-
-        // Handle wildcard DID: at://*/collection/*
-        if did_str == "*" {
-            if rkey != "*" {
-                return Err(QueryError::Invalid(
-                    "wildcard DID requires wildcard rkey (at://*/collection/*)".to_string(),
-                ));
+        match parts.len() {
+            // at://did or at://did/*
+            1 => {
+                let did_str = parts[0];
+                if did_str == "*" {
+                    return Err(QueryError::Invalid(
+                        "at://* is not supported, use at://*/collection/*".to_string(),
+                    ));
+                }
+                let did: Did = did_str.parse()?;
+                Ok(Query::AllForDid { did })
             }
-            return Ok(Query::AllCollection { collection });
-        }
+            // at://did/collection (treat as at://did/collection/*)
+            2 => {
+                let did_str = parts[0];
+                let collection_str = parts[1];
 
-        let did: Did = did_str.parse()?;
+                // at://did/* - all collections for DID
+                if collection_str == "*" {
+                    if did_str == "*" {
+                        return Err(QueryError::Invalid(
+                            "at://*/* is not supported".to_string(),
+                        ));
+                    }
+                    let did: Did = did_str.parse()?;
+                    return Ok(Query::AllForDid { did });
+                }
 
-        if rkey == "*" {
-            Ok(Query::Collection { did, collection })
-        } else {
-            let uri: AtUri = input.parse()?;
-            Ok(Query::Exact(uri))
+                let collection: Nsid = collection_str.parse()?;
+
+                if did_str == "*" {
+                    // at://*/collection - treat as at://*/collection/*
+                    return Ok(Query::AllCollection { collection });
+                }
+
+                let did: Did = did_str.parse()?;
+                Ok(Query::Collection { did, collection })
+            }
+            // at://did/collection/rkey
+            3 => {
+                let did_str = parts[0];
+                let collection: Nsid = parts[1].parse()?;
+                let rkey = parts[2];
+
+                // Handle wildcard DID: at://*/collection/*
+                if did_str == "*" {
+                    if rkey != "*" {
+                        return Err(QueryError::Invalid(
+                            "wildcard DID requires wildcard rkey (at://*/collection/*)".to_string(),
+                        ));
+                    }
+                    return Ok(Query::AllCollection { collection });
+                }
+
+                let did: Did = did_str.parse()?;
+
+                if rkey == "*" {
+                    Ok(Query::Collection { did, collection })
+                } else {
+                    let uri: AtUri = input.parse()?;
+                    Ok(Query::Exact(uri))
+                }
+            }
+            _ => Err(QueryError::Invalid("invalid query format".to_string())),
         }
     }
 }
@@ -83,6 +121,10 @@ pub fn execute_paginated(
         Query::AllCollection { collection } => {
             // For all collection query, cursor is the full URI
             Ok(store.scan_all_collection_paginated(collection, cursor, limit)?)
+        }
+        Query::AllForDid { did } => {
+            // Scan all collections for this DID
+            Ok(store.scan_did_paginated(did, cursor, limit)?)
         }
     }
 }
@@ -131,8 +173,58 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_all_for_did() {
+        // at://did returns all records for that DID
+        let q = Query::parse("at://did:plc:xyz").unwrap();
+        match q {
+            Query::AllForDid { did } => {
+                assert_eq!(did.as_str(), "did:plc:xyz");
+            }
+            _ => panic!("expected AllForDid"),
+        }
+    }
+
+    #[test]
+    fn test_parse_all_for_did_with_wildcard() {
+        // at://did/* also returns all records for that DID
+        let q = Query::parse("at://did:plc:xyz/*").unwrap();
+        match q {
+            Query::AllForDid { did } => {
+                assert_eq!(did.as_str(), "did:plc:xyz");
+            }
+            _ => panic!("expected AllForDid"),
+        }
+    }
+
+    #[test]
+    fn test_parse_collection_shorthand() {
+        // at://did/collection (without /*) is shorthand for at://did/collection/*
+        let q = Query::parse("at://did:plc:xyz/app.bsky.feed.post").unwrap();
+        match q {
+            Query::Collection { did, collection } => {
+                assert_eq!(did.as_str(), "did:plc:xyz");
+                assert_eq!(collection.as_str(), "app.bsky.feed.post");
+            }
+            _ => panic!("expected Collection"),
+        }
+    }
+
+    #[test]
+    fn test_parse_all_collection_shorthand() {
+        // at://*/collection (without /*) is shorthand for at://*/collection/*
+        let q = Query::parse("at://*/app.bsky.feed.post").unwrap();
+        match q {
+            Query::AllCollection { collection } => {
+                assert_eq!(collection.as_str(), "app.bsky.feed.post");
+            }
+            _ => panic!("expected AllCollection"),
+        }
+    }
+
+    #[test]
     fn test_parse_invalid() {
         assert!(Query::parse("not-a-uri").is_err());
-        assert!(Query::parse("at://did:plc:xyz").is_err());
+        assert!(Query::parse("at://*").is_err()); // wildcard-only DID not allowed
+        assert!(Query::parse("at://*/*").is_err()); // double wildcard not allowed
     }
 }

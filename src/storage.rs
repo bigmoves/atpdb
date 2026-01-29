@@ -397,13 +397,15 @@ impl Store {
         let mut results = Vec::new();
         let mut skip_first = cursor.is_some();
 
+        let uri_prefix = format!("at://{}/{}/", did.as_str(), collection.as_str());
+
         for item in self.records.range(start_key..) {
             // Get value first (consumes item)
             let value = item.value()?;
             let record: Record = serde_json::from_slice(&value)?;
 
-            // Check if still in collection by parsing URI
-            if !record.uri.contains(&format!("/{}/", collection.as_str())) {
+            // Check if still in correct DID and collection
+            if !record.uri.starts_with(&uri_prefix) {
                 break;
             }
 
@@ -475,6 +477,56 @@ impl Store {
             if !past_cursor {
                 if cursor.is_some_and(|c| record.uri == c) {
                     past_cursor = true; // Found cursor, skip it and start collecting after
+                }
+                continue;
+            }
+
+            results.push(record);
+            if results.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(results)
+    }
+
+    /// Scan all records for a specific DID across all collections
+    /// Note: Less efficient than collection-based queries due to key structure
+    pub fn scan_did_paginated(
+        &self,
+        did: &Did,
+        cursor: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Record>, StorageError> {
+        let did_pattern = format!("at://{}/", did.as_str());
+        let mut results = Vec::new();
+        let mut past_cursor = cursor.is_none();
+
+        // Iterate all records and filter by DID in the record's URI
+        for item in self.records.prefix(b"") {
+            let value = match item.value() {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            if value.is_empty() {
+                continue;
+            }
+
+            let record: Record = match serde_json::from_slice(&value) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            // Check if this record belongs to our DID
+            if !record.uri.starts_with(&did_pattern) {
+                continue;
+            }
+
+            // Skip records until we're past the cursor
+            if !past_cursor {
+                if cursor.is_some_and(|c| record.uri == c) {
+                    past_cursor = true;
                 }
                 continue;
             }

@@ -103,6 +103,10 @@ async fn sync_one_repo(app: &AppState, did: &str) {
                 state.error = None;
                 state.retry_count = 0;
                 state.next_retry = None;
+                // Store handle if resolved
+                if let Some(handle) = sync_result.handle {
+                    let _ = app.set_handle(did, &handle);
+                }
             }
             Ok(Err(e)) => {
                 state.status = RepoStatus::Error;

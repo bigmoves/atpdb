@@ -29,6 +29,7 @@ fn http_client() -> &'static reqwest::blocking::Client {
 pub struct SyncResult {
     pub record_count: usize,
     pub rev: Option<String>,
+    pub handle: Option<String>,
 }
 
 #[derive(Error, Debug)]
@@ -46,6 +47,13 @@ pub enum SyncError {
 #[derive(Deserialize)]
 struct DidDocument {
     service: Option<Vec<DidService>>,
+    #[serde(rename = "alsoKnownAs")]
+    also_known_as: Option<Vec<String>>,
+}
+
+struct ResolvedDid {
+    pds: String,
+    handle: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -55,8 +63,8 @@ struct DidService {
     service_endpoint: String,
 }
 
-/// Resolve a DID to find the PDS endpoint
-fn resolve_pds(did: &str) -> Result<String, SyncError> {
+/// Resolve a DID to find the PDS endpoint and handle
+fn resolve_did(did: &str) -> Result<ResolvedDid, SyncError> {
     let url = if did.starts_with("did:plc:") {
         format!("https://plc.directory/{}", did)
     } else if did.starts_with("did:web:") {
@@ -71,14 +79,23 @@ fn resolve_pds(did: &str) -> Result<String, SyncError> {
 
     let doc: DidDocument = http_client().get(&url).send()?.json()?;
 
-    doc.service
+    let pds = doc
+        .service
         .and_then(|services| {
             services
                 .into_iter()
                 .find(|s| s.id == "#atproto_pds" || s.id.ends_with("#atproto_pds"))
                 .map(|s| s.service_endpoint)
         })
-        .ok_or_else(|| SyncError::DidResolution("no PDS service found".to_string()))
+        .ok_or_else(|| SyncError::DidResolution("no PDS service found".to_string()))?;
+
+    // Extract handle from alsoKnownAs (format: "at://handle")
+    let handle = doc.also_known_as.and_then(|aka| {
+        aka.into_iter()
+            .find_map(|s| s.strip_prefix("at://").map(|h| h.to_string()))
+    });
+
+    Ok(ResolvedDid { pds, handle })
 }
 
 /// Sync a repo by DID with optional collection filtering
@@ -90,12 +107,15 @@ pub fn sync_repo(
     search: Option<&SearchIndex>,
     search_fields: &[SearchFieldConfig],
 ) -> Result<SyncResult, SyncError> {
-    println!("Resolving DID...");
-    let pds = resolve_pds(did)?;
-    println!("PDS: {}", pds);
+    tracing::debug!("resolving DID {}", did);
+    let resolved = resolve_did(did)?;
+    tracing::debug!("PDS: {}, handle: {:?}", resolved.pds, resolved.handle);
 
-    println!("Fetching repo...");
-    let url = format!("{}/xrpc/com.atproto.sync.getRepo?did={}", pds, did);
+    tracing::debug!("fetching repo...");
+    let url = format!(
+        "{}/xrpc/com.atproto.sync.getRepo?did={}",
+        resolved.pds, did
+    );
     let response = http_client().get(&url).send()?;
 
     if !response.status().is_success() {
@@ -103,11 +123,13 @@ pub fn sync_repo(
     }
 
     let car_bytes = response.bytes()?;
-    println!("Downloaded {} bytes", car_bytes.len());
+    tracing::debug!("downloaded {} bytes", car_bytes.len());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let result = rt.block_on(process_car(&car_bytes, did, store, collections, indexes, search, search_fields))?;
+    let mut result =
+        rt.block_on(process_car(&car_bytes, did, store, collections, indexes, search, search_fields))?;
 
+    result.handle = resolved.handle;
     Ok(result)
 }
 
@@ -204,5 +226,6 @@ async fn process_car(
     Ok(SyncResult {
         record_count: count,
         rev,
+        handle: None, // Set by caller after DID resolution
     })
 }

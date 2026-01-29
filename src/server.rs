@@ -563,8 +563,8 @@ async fn query_handler(
         let collection = match &parsed {
             Query::AllCollection { collection } => collection.as_str(),
             Query::Collection { collection, .. } => collection.as_str(),
-            Query::Exact(_) => {
-                // Exact queries don't need sorting, just return the record
+            Query::Exact(_) | Query::AllForDid { .. } => {
+                // Exact and AllForDid queries don't support sorting, use unsorted path
                 return execute_unsorted_query(
                     &app,
                     &parsed,
@@ -730,7 +730,7 @@ async fn execute_unsorted_query(
         match parsed {
             Query::AllCollection { collection } => app.store.count_collection(collection.as_str()).ok(),
             Query::Collection { collection, .. } => app.store.count_collection(collection.as_str()).ok(),
-            Query::Exact(_) => Some(values.len()), // Exact query - count is just result count
+            Query::Exact(_) | Query::AllForDid { .. } => Some(values.len()), // Count is just result count
         }
     } else {
         None
@@ -768,6 +768,14 @@ async fn execute_search_query(
         Query::AllCollection { collection } => collection.as_str(),
         Query::Collection { collection, .. } => collection.as_str(),
         Query::Exact(uri) => uri.collection.as_str(),
+        Query::AllForDid { .. } => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "search not supported for DID-only queries".to_string(),
+                }),
+            ));
+        }
     };
 
     // Overfetch when sorting to ensure enough records after re-ranking
@@ -906,6 +914,7 @@ async fn sync_handler(
     State((app, _)): State<AppStateHandle>,
     Json(payload): Json<SyncRequest>,
 ) -> Result<Json<SyncResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let did = payload.did.clone();
     let store = Arc::new(app.store.clone());
     let config = app.config();
     let collections = config.collections.clone();
@@ -926,9 +935,15 @@ async fn sync_handler(
         })?;
 
     match result {
-        Ok(sync_result) => Ok(Json(SyncResponse {
-            synced: sync_result.record_count,
-        })),
+        Ok(sync_result) => {
+            // Store handle if resolved
+            if let Some(handle) = &sync_result.handle {
+                let _ = app.set_handle(&did, handle);
+            }
+            Ok(Json(SyncResponse {
+                synced: sync_result.record_count,
+            }))
+        }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {

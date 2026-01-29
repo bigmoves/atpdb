@@ -120,7 +120,8 @@ fn handle_command(
             println!();
             println!("Handles:");
             println!("  .handles sync             Fetch handles for all known DIDs from PLC directory");
-            println!("  .handles get <did>        Get handle for a specific DID");
+            println!("  .handles get <did>        Get stored handle for a DID");
+            println!("  .handles fetch <did>      Fetch and store handle from PLC directory");
             println!();
             println!("Counts:");
             println!("  .count <collection>       Show collection count");
@@ -567,8 +568,22 @@ fn handle_command(
                         None => println!("No handle stored for {}", did),
                     }
                 }
+                _ if subcmd.starts_with("fetch ") => {
+                    let did = subcmd.strip_prefix("fetch ").unwrap().trim();
+                    match fetch_handle_from_plc(did) {
+                        Ok(Some(handle)) => {
+                            if let Err(e) = app.set_handle(did, &handle) {
+                                println!("Error storing handle: {}", e);
+                            } else {
+                                println!("{} -> {}", did, handle);
+                            }
+                        }
+                        Ok(None) => println!("No handle found for {}", did),
+                        Err(e) => println!("Error: {}", e),
+                    }
+                }
                 _ => {
-                    println!("Unknown handles command. Use: .handles sync | .handles get <did>");
+                    println!("Usage: .handles sync | .handles get <did> | .handles fetch <did>");
                 }
             }
             CommandResult::Continue
@@ -773,6 +788,10 @@ fn handle_command(
                 match sync::sync_repo(did, &store, &config.collections, &config.indexes, app.search.as_ref(), &config.search_fields) {
                     Ok(result) => {
                         let elapsed = start.elapsed();
+                        // Store handle if resolved
+                        if let Some(handle) = &result.handle {
+                            let _ = app.set_handle(did, handle);
+                        }
                         println!("Synced {} records ({:.2?})", result.record_count, elapsed);
                     }
                     Err(e) => println!("Sync error: {}", e),
