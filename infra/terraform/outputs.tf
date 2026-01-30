@@ -12,3 +12,8 @@ output "server_name" {
   description = "Name of the server"
   value       = hcloud_server.main.name
 }
+
+output "data_volume_id" {
+  description = "ID of the data volume"
+  value       = hcloud_volume.data.id
+}

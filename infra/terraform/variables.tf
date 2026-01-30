@@ -60,3 +60,9 @@ variable "subdomain" {
   type        = string
   default     = "atpdb"
 }
+
+variable "data_volume_size" {
+  description = "Size of data volume in GB"
+  type        = number
+  default     = 50
+}
