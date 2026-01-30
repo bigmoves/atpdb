@@ -4,12 +4,13 @@ use crate::search::SearchIndex;
 use crate::storage::{Record, Store};
 use crate::types::AtUri;
 use metrics::histogram;
-use repo_stream::DriverBuilder;
+use repo_stream::{DiskBuilder, DriverBuilder};
 use serde::Deserialize;
 use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
+use tracing::warn;
 
 /// Timeout for repo fetch operations (5 minutes for large repos)
 const REPO_FETCH_TIMEOUT: Duration = Duration::from_secs(300);
@@ -220,21 +221,101 @@ async fn process_car(
                                     }
                                 }
                                 Err(e) => {
-                                    eprintln!("CBOR decode error for {}: {}", uri_str, e);
+                                    warn!(uri = %uri_str, error = %e, "CBOR decode error");
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("URI parse error for {}: {}", uri_str, e);
+                            warn!(uri = %uri_str, error = %e, "URI parse error");
                         }
                     }
                 }
             }
         }
-        repo_stream::Driver::Disk(_paused) => {
-            return Err(SyncError::Car(
-                "CAR too large for memory, disk mode not implemented".to_string(),
-            ));
+        repo_stream::Driver::Disk(need_disk) => {
+            // Large repo - use disk-backed storage
+            // Use timestamp + thread ID for unique temp directory
+            let unique_id = format!(
+                "{}-{:?}",
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                std::thread::current().id()
+            );
+            let temp_dir = std::env::temp_dir().join(format!("atpdb-sync-{}", unique_id));
+
+            let disk_store = DiskBuilder::new()
+                .with_cache_size_mb(64)
+                .with_max_stored_mb(2048) // 2GB max for really large repos
+                .open(temp_dir.clone())
+                .await
+                .map_err(|e| SyncError::Car(format!("Failed to create disk store: {}", e)))?;
+
+            let (commit, mut driver) = need_disk
+                .finish_loading(disk_store)
+                .await
+                .map_err(|e| SyncError::Car(format!("Failed to finish loading: {}", e)))?;
+
+            rev = Some(commit.rev.clone());
+
+            while let Some(chunk) = driver
+                .next_chunk(256)
+                .await
+                .map_err(|e| SyncError::Car(e.to_string()))?
+            {
+                for output in chunk {
+                    let parts: Vec<&str> = output.rkey.splitn(2, '/').collect();
+                    if parts.len() != 2 {
+                        continue;
+                    }
+                    let collection = parts[0];
+
+                    if !matches_any_filter(collection, &collections) {
+                        continue;
+                    }
+
+                    let uri_str = format!("at://{}/{}", did, output.rkey);
+
+                    match uri_str.parse::<AtUri>() {
+                        Ok(uri) => match dagcbor_to_json(&output.data) {
+                            Ok(value) => {
+                                let record = Record {
+                                    uri: uri_str,
+                                    cid: output.cid.to_string(),
+                                    value,
+                                    indexed_at: SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs(),
+                                };
+                                if store.put_with_indexes(&uri, &record, &indexes).is_ok() {
+                                    if let Some(search) = search {
+                                        let _ = search.index_record(
+                                            &record.uri,
+                                            collection,
+                                            &record.value,
+                                            &search_fields,
+                                        );
+                                    }
+                                    count += 1;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(uri = %uri_str, error = %e, "CBOR decode error");
+                            }
+                        },
+                        Err(e) => {
+                            warn!(uri = %uri_str, error = %e, "URI parse error");
+                        }
+                    }
+                }
+            }
+
+            // Clean up temp directory
+            if let Err(e) = std::fs::remove_dir_all(&temp_dir) {
+                warn!(path = %temp_dir.display(), error = %e, "Failed to clean up temp dir");
+            }
         }
     }
 
