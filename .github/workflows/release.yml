@@ -1,0 +1,32 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Build release binary
+        run: cargo build --release
+
+      - name: Rename binary
+        run: mv target/release/atpdb target/release/atpdb-linux-amd64
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: target/release/atpdb-linux-amd64
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
