@@ -5,6 +5,7 @@ use crate::storage::Record;
 use crate::sync::{cleanup_pds_backoff, sync_repo, SyncError};
 use crate::types::AtUri;
 use metrics::{counter, gauge};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -19,6 +20,7 @@ pub struct SyncWorker {
     app: Arc<AppState>,
     queue_rx: mpsc::Receiver<String>,
     parallelism: u32,
+    running: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -36,7 +38,7 @@ impl SyncHandle {
     }
 }
 
-pub fn start_sync_worker(app: Arc<AppState>) -> SyncHandle {
+pub fn start_sync_worker(app: Arc<AppState>, running: Arc<AtomicBool>) -> SyncHandle {
     let config = app.config();
     let (queue_tx, queue_rx) = mpsc::channel(1000);
 
@@ -48,6 +50,7 @@ pub fn start_sync_worker(app: Arc<AppState>) -> SyncHandle {
         app: Arc::clone(&app),
         queue_rx,
         parallelism: config.sync_parallelism,
+        running,
     };
 
     // Pass handle clone to worker for retry_loop
@@ -93,8 +96,9 @@ impl SyncWorker {
     async fn run(mut self, retry_handle: SyncHandle) {
         // Spawn retry checker with handle for re-queuing
         let app_clone = Arc::clone(&self.app);
+        let running_clone = Arc::clone(&self.running);
         tokio::spawn(async move {
-            retry_loop(app_clone, retry_handle).await;
+            retry_loop(app_clone, retry_handle, running_clone).await;
         });
 
         // Process queue
@@ -204,12 +208,15 @@ async fn sync_one_repo(app: &AppState, did: &str) {
     }
 }
 
-async fn retry_loop(app: Arc<AppState>, handle: SyncHandle) {
+async fn retry_loop(app: Arc<AppState>, handle: SyncHandle, running: Arc<AtomicBool>) {
     let mut tick_count: u32 = 0;
 
-    loop {
+    while running.load(Ordering::Relaxed) {
         // 5 second interval for quick rate-limit recovery
         tokio::time::sleep(Duration::from_secs(5)).await;
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
         tick_count = tick_count.wrapping_add(1);
 
         // Clean up PDS backoff map every ~60 seconds (12 ticks)

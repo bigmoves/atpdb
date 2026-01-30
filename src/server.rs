@@ -1870,7 +1870,7 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
     let running = Arc::new(AtomicBool::new(true));
 
     // Start sync worker
-    let sync_handle = Arc::new(start_sync_worker(Arc::clone(&app)));
+    let sync_handle = Arc::new(start_sync_worker(Arc::clone(&app), Arc::clone(&running)));
 
     // Start crawler
     start_crawler(
@@ -1896,13 +1896,17 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
 
     let app_for_shutdown = Arc::clone(&app);
     let app_for_gauges = Arc::clone(&app);
+    let running_for_gauges = Arc::clone(&running);
     let metrics_state: MetricsState = (prometheus_handle, Arc::clone(&app));
     let state: AppStateHandle = (app, sync_handle);
 
     // Background task to update gauges every 30 seconds (on blocking thread pool)
     tokio::spawn(async move {
-        loop {
+        while running_for_gauges.load(Ordering::Relaxed) {
             tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            if !running_for_gauges.load(Ordering::Relaxed) {
+                break;
+            }
             let app = Arc::clone(&app_for_gauges);
             let _ = tokio::task::spawn_blocking(move || update_app_gauges(&app)).await;
         }
