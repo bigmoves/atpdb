@@ -432,10 +432,11 @@ pub struct StatsResponse {
 
 #[derive(Serialize)]
 pub struct KeyCounts {
-    records: usize,      // at://*
-    indexes: usize,      // idx:*
-    reverse: usize,      // rev:*
-    counts: usize,       // __count__:* and __revcount__:*
+    primary: usize,       // actual records ({collection}\0{did}\0{rkey})
+    indexes_asc: usize,   // idx:a:* (ascending indexes)
+    indexes_desc: usize,  // idx:d:* (descending indexes)
+    reverse: usize,       // rev:* (AtUri field indexes)
+    counts: usize,        // __count__:* and __revcount__:*
 }
 
 #[derive(Serialize)]
@@ -618,15 +619,22 @@ async fn stats(State((app, _)): State<AppStateHandle>) -> Result<Json<StatsRespo
     }
 
     // Count keys by prefix type
-    let record_count = app.store.count_by_prefix("at://").unwrap_or(0);
-    let index_count = app.store.count_by_prefix("idx:").unwrap_or(0);
+    let indexes_asc = app.store.count_by_prefix("idx:a:").unwrap_or(0);
+    let indexes_desc = app.store.count_by_prefix("idx:d:").unwrap_or(0);
     let reverse_count = app.store.count_by_prefix("rev:").unwrap_or(0);
     let counts_count = app.store.count_by_prefix("__count__:").unwrap_or(0)
         + app.store.count_by_prefix("__revcount__:").unwrap_or(0);
+    // Primary records = total - all index/metadata keys
+    let primary_count = total_keys
+        .saturating_sub(indexes_asc)
+        .saturating_sub(indexes_desc)
+        .saturating_sub(reverse_count)
+        .saturating_sub(counts_count);
 
     let key_counts = KeyCounts {
-        records: record_count,
-        indexes: index_count,
+        primary: primary_count,
+        indexes_asc,
+        indexes_desc,
         reverse: reverse_count,
         counts: counts_count,
     };
