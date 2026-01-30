@@ -107,6 +107,8 @@ runcmd:
   - ufw allow ssh
   - ufw allow http
   - ufw allow https
+  # Allow Docker containers to reach host services (Caddy -> atpdb)
+  - ufw allow from 172.16.0.0/12 to any port 3000
   - ufw --force enable
 
   # Create data directory and mount volume
