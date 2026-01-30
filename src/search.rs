@@ -10,6 +10,7 @@ use tantivy::schema::{
 use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use thiserror::Error;
+use tracing::{debug, error, info, warn};
 
 use crate::config::SearchFieldConfig;
 
@@ -345,7 +346,7 @@ impl SearchIndex {
             .collect();
 
         for collection in collections {
-            eprintln!("Indexing collection: {}", collection);
+            info!(collection, "Indexing collection");
             let collection_nsid: crate::types::Nsid = match collection.parse() {
                 Ok(n) => n,
                 Err(_) => continue,
@@ -355,19 +356,23 @@ impl SearchIndex {
             let records = match store.scan_all_collection(&collection_nsid) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("Error scanning {}: {}", collection, e);
+                    error!(collection, error = %e, "Error scanning collection");
                     errors += 1;
                     continue;
                 }
             };
 
-            eprintln!("  found {} records to index", records.len());
+            debug!(
+                collection,
+                record_count = records.len(),
+                "Found records to index"
+            );
 
             for record in records {
                 if let Err(e) =
                     self.index_record(&record.uri, collection, &record.value, search_fields)
                 {
-                    eprintln!("Error indexing {}: {}", record.uri, e);
+                    warn!(uri = record.uri, error = %e, "Error indexing record");
                     errors += 1;
                     continue;
                 }
@@ -375,7 +380,7 @@ impl SearchIndex {
                 counter!("search_reindex_records_total").increment(1);
 
                 if count % 50000 == 0 {
-                    eprintln!("  indexed {} records...", count);
+                    info!(count, "Indexed records...");
                 }
             }
         }
@@ -384,7 +389,7 @@ impl SearchIndex {
         self.commit()?;
 
         if errors > 0 {
-            eprintln!("Completed with {} errors", errors);
+            warn!(errors, "Completed with errors");
         }
 
         Ok(count)

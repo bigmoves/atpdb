@@ -122,10 +122,12 @@ impl AppState {
                     let _ = store.records_keyspace().remove(&key);
                 }
 
-                println!("Building index {}...", index_label);
+                tracing::info!(index = index_label, "Building index");
                 match store.rebuild_index(index) {
-                    Ok(count) => println!("Built index with {} entries", count),
-                    Err(e) => eprintln!("Error building index: {}", e),
+                    Ok(count) => tracing::info!(index = index_label, count, "Built index"),
+                    Err(e) => {
+                        tracing::error!(index = index_label, error = %e, "Error building index")
+                    }
                 }
             }
         }
@@ -145,10 +147,12 @@ impl AppState {
                 .is_some();
 
             if !has_ts_index {
-                println!("Rebuilding __ts__ index for {}...", collection);
+                tracing::info!(collection, "Rebuilding __ts__ index");
                 match store.rebuild_indexed_at(collection) {
-                    Ok(count) => println!("Built __ts__ index with {} entries", count),
-                    Err(e) => eprintln!("Error building __ts__ index: {}", e),
+                    Ok(count) => tracing::info!(collection, count, "Built __ts__ index"),
+                    Err(e) => {
+                        tracing::error!(collection, error = %e, "Error building __ts__ index")
+                    }
                 }
             }
         }
@@ -232,13 +236,13 @@ impl AppState {
                 let search = search.clone();
                 let store = self.store.clone();
                 std::thread::spawn(move || {
-                    eprintln!(
-                        "Auto-reindexing {} new search field(s)...",
-                        new_fields.len()
+                    tracing::info!(
+                        field_count = new_fields.len(),
+                        "Auto-reindexing new search fields"
                     );
                     match search.reindex_from_store(&store, &new_fields) {
-                        Ok(count) => eprintln!("Auto-reindexed {} records", count),
-                        Err(e) => eprintln!("Auto-reindex error: {}", e),
+                        Ok(count) => tracing::info!(count, "Auto-reindexed records"),
+                        Err(e) => tracing::error!(error = %e, "Auto-reindex error"),
                     }
                 });
             }

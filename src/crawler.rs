@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tracing::{debug, error, info, warn};
 
 /// Ensure URL has https:// scheme for HTTP API calls
 fn to_https_url(url: &str) -> String {
@@ -97,7 +98,7 @@ impl Crawler {
         loop {
             // Check for shutdown signal
             if !self.should_continue() {
-                println!("Crawler: shutdown requested, stopping enumeration");
+                info!("Crawler shutdown requested, stopping enumeration");
                 break;
             }
 
@@ -109,11 +110,11 @@ impl Crawler {
                 _ => format!("{}/xrpc/com.atproto.sync.listRepos?limit=1000", relay_base),
             };
 
-            println!("Crawling: {}", url);
+            debug!(url, "Crawling repos");
             let response: ListReposResponse = match self.client.get(&url).send() {
                 Ok(r) => r.json()?,
-                Err(e) if !self.should_continue() => {
-                    println!("Crawler: shutdown during request");
+                Err(_) if !self.should_continue() => {
+                    info!("Crawler shutdown during request");
                     return Ok(total_discovered);
                 }
                 Err(e) => return Err(e.into()),
@@ -164,7 +165,7 @@ impl Crawler {
         loop {
             // Check for shutdown signal
             if !self.should_continue() {
-                println!("Crawler: shutdown requested, stopping enumeration");
+                info!("Crawler shutdown requested, stopping enumeration");
                 break;
             }
 
@@ -179,11 +180,11 @@ impl Crawler {
                 ),
             };
 
-            println!("Crawling by collection: {}", url);
+            debug!(url, "Crawling by collection");
             let response: ListReposByCollectionResponse = match self.client.get(&url).send() {
                 Ok(r) => r.json()?,
-                Err(e) if !self.should_continue() => {
-                    println!("Crawler: shutdown during request");
+                Err(_) if !self.should_continue() => {
+                    info!("Crawler shutdown during request");
                     return Ok(total_discovered);
                 }
                 Err(e) => return Err(e.into()),
@@ -221,23 +222,23 @@ impl Crawler {
 
         match config.mode {
             Mode::Manual => {
-                println!("Crawler: Manual mode, skipping enumeration");
+                info!("Crawler: Manual mode, skipping enumeration");
                 Ok(0)
             }
             Mode::Signal => {
                 if let Some(ref collection) = config.signal_collection {
-                    println!(
-                        "Crawler: Signal mode, enumerating by collection: {}",
-                        collection
+                    info!(
+                        collection,
+                        "Crawler: Signal mode, enumerating by collection"
                     );
                     self.enumerate_by_collection(collection)
                 } else {
-                    println!("Crawler: Signal mode but no signal_collection configured");
+                    warn!("Crawler: Signal mode but no signal_collection configured");
                     Ok(0)
                 }
             }
             Mode::FullNetwork => {
-                println!("Crawler: Full network mode, enumerating all repos");
+                info!("Crawler: Full network mode, enumerating all repos");
                 self.enumerate_all()
             }
         }
@@ -249,8 +250,8 @@ pub fn start_crawler(app: Arc<AppState>, sync_handle: Arc<SyncHandle>, running: 
     std::thread::spawn(move || {
         let crawler = Crawler::new(app, sync_handle, running);
         match crawler.run_based_on_mode() {
-            Ok(count) => println!("Crawler: discovered {} new repos", count),
-            Err(e) => eprintln!("Crawler error: {}", e),
+            Ok(count) => info!(count, "Crawler: discovered new repos"),
+            Err(e) => error!(error = %e, "Crawler error"),
         }
     });
 }

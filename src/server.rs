@@ -1652,7 +1652,10 @@ fn start_firehose(
                                             let state = RepoState::new(did.to_string());
                                             let _ = app.repos.put(&state);
                                             let _ = sync_handle.queue_blocking(did.to_string());
-                                            eprintln!("Auto-syncing new DID: {}", did);
+                                            tracing::info!(
+                                                did = did.as_str(),
+                                                "Auto-syncing new DID"
+                                            );
                                         }
 
                                         true
@@ -1694,7 +1697,7 @@ fn start_firehose(
                                                 &record,
                                                 &config.indexes,
                                             ) {
-                                                eprintln!("Storage error: {}", e);
+                                                tracing::error!(error = %e, "Storage error");
                                             }
                                             // Index for search
                                             if let Some(ref search) = app.search {
@@ -1704,7 +1707,7 @@ fn start_firehose(
                                                     &record.value,
                                                     &config.search_fields,
                                                 ) {
-                                                    eprintln!("Search index error: {}", e);
+                                                    tracing::error!(error = %e, "Search index error");
                                                 }
                                             }
                                         }
@@ -1731,7 +1734,7 @@ fn start_firehose(
                                                 &record,
                                                 &config.indexes,
                                             ) {
-                                                eprintln!("Storage error: {}", e);
+                                                tracing::error!(error = %e, "Storage error");
                                             }
                                             // Index for search
                                             if let Some(ref search) = app.search {
@@ -1741,7 +1744,7 @@ fn start_firehose(
                                                     &record.value,
                                                     &config.search_fields,
                                                 ) {
-                                                    eprintln!("Search index error: {}", e);
+                                                    tracing::error!(error = %e, "Search index error");
                                                 }
                                             }
                                         }
@@ -1755,14 +1758,14 @@ fn start_firehose(
                                             if let Err(e) =
                                                 app.store.delete_with_indexes(&uri, &config.indexes)
                                             {
-                                                eprintln!("Storage error: {}", e);
+                                                tracing::error!(error = %e, "Storage error");
                                             }
                                             // Remove from search index
                                             if let Some(ref search) = app.search {
                                                 if let Err(e) =
                                                     search.delete_record(&uri.to_string())
                                                 {
-                                                    eprintln!("Search delete error: {}", e);
+                                                    tracing::error!(error = %e, "Search delete error");
                                                 }
                                             }
                                         }
@@ -1773,7 +1776,7 @@ fn start_firehose(
                                 last_seq = seq;
                                 if let Some(h) = handle {
                                     if let Err(e) = app.set_handle(did.as_str(), &h) {
-                                        eprintln!("Handle update error: {}", e);
+                                        tracing::error!(error = %e, "Handle update error");
                                     }
                                 }
                             }
@@ -1790,7 +1793,7 @@ fn start_firehose(
                                 gauge!("firehose_connected").set(0.0);
                                 counter!("firehose_errors_total", "error" => "connection")
                                     .increment(1);
-                                eprintln!("Firehose error: {}", e);
+                                tracing::error!(error = %e, "Firehose error");
                                 // Save cursor before reconnecting
                                 if last_seq > 0 {
                                     let _ = app.set_firehose_cursor(&relay, last_seq);
@@ -1812,13 +1815,13 @@ fn start_firehose(
                 Err(e) => {
                     gauge!("firehose_connected").set(0.0);
                     counter!("firehose_errors_total", "error" => "connect").increment(1);
-                    eprintln!("Failed to connect to firehose: {}", e);
+                    tracing::error!(error = %e, "Failed to connect to firehose");
                 }
             }
 
             // Reconnect with exponential backoff
             if running.load(Ordering::Relaxed) {
-                eprintln!("Reconnecting to firehose in {:?}...", reconnect_delay);
+                tracing::warn!(delay = ?reconnect_delay, "Reconnecting to firehose");
                 std::thread::sleep(reconnect_delay);
                 reconnect_delay = std::cmp::min(reconnect_delay * 2, max_delay);
             }

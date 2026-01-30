@@ -994,7 +994,7 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                                 };
 
                                 if let Err(e) = app.resync_buffer.add(&commit) {
-                                    eprintln!("Failed to buffer commit: {}", e);
+                                    tracing::error!(error = %e, "Failed to buffer commit");
                                 }
                                 continue;
                             }
@@ -1019,7 +1019,7 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                                             &record,
                                             &config.indexes,
                                         ) {
-                                            eprintln!("Storage error: {}", e);
+                                            tracing::error!(error = %e, "Storage error");
                                         }
                                         // Index for search
                                         if let Some(ref search) = app.search {
@@ -1029,7 +1029,7 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                                                 &record.value,
                                                 &config.search_fields,
                                             ) {
-                                                eprintln!("Search index error: {}", e);
+                                                tracing::error!(error = %e, "Search index error");
                                             }
                                         }
                                     }
@@ -1038,12 +1038,12 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                                         if let Err(e) =
                                             app.store.delete_with_indexes(&uri, &config.indexes)
                                         {
-                                            eprintln!("Storage error: {}", e);
+                                            tracing::error!(error = %e, "Storage error");
                                         }
                                         // Remove from search index
                                         if let Some(ref search) = app.search {
                                             if let Err(e) = search.delete_record(&uri.to_string()) {
-                                                eprintln!("Search delete error: {}", e);
+                                                tracing::error!(error = %e, "Search delete error");
                                             }
                                         }
                                     }
@@ -1054,7 +1054,7 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                             last_seq = seq;
                             if let Some(h) = handle {
                                 if let Err(e) = app.set_handle(did.as_str(), &h) {
-                                    eprintln!("Handle update error: {}", e);
+                                    tracing::error!(error = %e, "Handle update error");
                                 }
                             }
                         }
@@ -1064,7 +1064,7 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                             continue;
                         }
                         Err(e) => {
-                            eprintln!("Firehose error: {}", e);
+                            tracing::error!(error = %e, "Firehose error");
                             break;
                         }
                     }
