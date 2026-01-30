@@ -171,7 +171,7 @@ pub fn sync_repo(
 
     debug!(did, "resolving DID");
     let resolved = resolve_did(did)?;
-    debug!(did, pds = %resolved.pds, handle = ?resolved.handle, "resolved DID");
+    debug!(did, pds = %resolved.pds, handle = resolved.handle.as_deref().unwrap_or("unknown"), "resolved DID");
 
     // Check if PDS is in backoff from previous rate limiting
     if pds_backoff().is_in_backoff(&resolved.pds) {
