@@ -108,3 +108,15 @@ variable "atpdb_cache_size_mb" {
   type        = number
   default     = 1024
 }
+
+variable "atpdb_log_level" {
+  description = "Rust log level (e.g., info, debug, atpdb=debug)"
+  type        = string
+  default     = "atpdb=info,tower_http=info"
+}
+
+variable "atpdb_sync_parallelism" {
+  description = "Number of parallel repo sync workers"
+  type        = number
+  default     = 5
+}

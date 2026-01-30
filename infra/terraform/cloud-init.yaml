@@ -70,6 +70,8 @@ write_files:
       Environment=ATPDB_SEARCH_FIELDS=${atpdb_search_fields}
 %{ endif ~}
       Environment=ATPDB_CACHE_SIZE_MB=${atpdb_cache_size_mb}
+      Environment=ATPDB_SYNC_PARALLELISM=${atpdb_sync_parallelism}
+      Environment=RUST_LOG=${atpdb_log_level}
       Restart=always
       RestartSec=5
 
