@@ -104,17 +104,33 @@ impl SyncWorker {
         // Process queue
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.parallelism as usize));
 
-        while let Some(did) = self.queue_rx.recv().await {
-            gauge!("sync_queue_depth").set(self.queue_rx.len() as f64);
-            let permit = semaphore.clone().acquire_owned().await.unwrap();
-            gauge!("sync_workers_active").increment(1.0);
-            let app = Arc::clone(&self.app);
+        loop {
+            // Check running flag with select to allow clean shutdown
+            tokio::select! {
+                maybe_did = self.queue_rx.recv() => {
+                    match maybe_did {
+                        Some(did) if self.running.load(Ordering::Relaxed) => {
+                            gauge!("sync_queue_depth").set(self.queue_rx.len() as f64);
+                            let permit = semaphore.clone().acquire_owned().await.unwrap();
+                            gauge!("sync_workers_active").increment(1.0);
+                            let app = Arc::clone(&self.app);
 
-            tokio::spawn(async move {
-                sync_one_repo(&app, &did).await;
-                gauge!("sync_workers_active").decrement(1.0);
-                drop(permit);
-            });
+                            tokio::spawn(async move {
+                                sync_one_repo(&app, &did).await;
+                                gauge!("sync_workers_active").decrement(1.0);
+                                drop(permit);
+                            });
+                        }
+                        _ => break, // Channel closed or shutdown requested
+                    }
+                }
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                    if !self.running.load(Ordering::Relaxed) {
+                        info!("Sync worker shutting down");
+                        break;
+                    }
+                }
+            }
         }
     }
 }

@@ -1948,7 +1948,8 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
     // Graceful shutdown on SIGTERM or SIGINT
-    let shutdown_signal = async {
+    let running_for_shutdown = Arc::clone(&running);
+    let shutdown_signal = async move {
         let ctrl_c = async {
             tokio::signal::ctrl_c()
                 .await
@@ -1971,15 +1972,18 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
             _ = terminate => {},
         }
 
-        println!("\nShutdown signal received, draining connections...");
+        println!("\nShutdown signal received, stopping background tasks...");
+        // Signal all background tasks to stop BEFORE draining connections
+        running_for_shutdown.store(false, Ordering::Relaxed);
+        // Give background tasks a moment to notice the flag
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        println!("Draining connections...");
     };
 
     axum::serve(listener, router)
         .with_graceful_shutdown(shutdown_signal)
         .await
         .unwrap();
-
-    running.store(false, Ordering::Relaxed);
 
     // Flush database to ensure all writes are persisted
     if let Err(e) = app_for_shutdown.flush() {
@@ -1989,4 +1993,11 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
     }
 
     println!("Server shutdown complete");
+
+    // Force exit after grace period if background tasks don't stop
+    // (spawn_blocking tasks can't be cancelled and may block shutdown)
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(2));
+        std::process::exit(0);
+    });
 }
