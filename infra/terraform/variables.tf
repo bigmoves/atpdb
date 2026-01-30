@@ -66,3 +66,39 @@ variable "data_volume_size" {
   type        = number
   default     = 50
 }
+
+# ATPDB Configuration
+variable "atpdb_mode" {
+  description = "ATPDB mode (manual, signal, full-network)"
+  type        = string
+  default     = "signal"
+}
+
+variable "atpdb_relay" {
+  description = "ATPDB relay WebSocket URL"
+  type        = string
+  default     = "wss://relay1.us-east.bsky.network"
+}
+
+variable "atpdb_signal_collection" {
+  description = "Signal collection for signal mode (optional)"
+  type        = string
+  default     = ""
+}
+
+variable "atpdb_collections" {
+  description = "Comma-separated list of collections to index"
+  type        = string
+}
+
+variable "atpdb_indexes" {
+  description = "Comma-separated list of indexes (col:field:type)"
+  type        = string
+  default     = ""
+}
+
+variable "atpdb_search_fields" {
+  description = "Comma-separated list of search fields (col:field)"
+  type        = string
+  default     = ""
+}

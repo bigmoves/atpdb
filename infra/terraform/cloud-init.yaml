@@ -56,12 +56,18 @@ write_files:
       User=deploy
       WorkingDirectory=/data/atpdb
       ExecStart=/usr/local/bin/atpdb serve
-      Environment=ATPDB_MODE=signal
-      Environment=ATPDB_RELAY=wss://relay1.us-east.bsky.network
-      Environment=ATPDB_SIGNAL_COLLECTION=fm.teal.alpha.feed.play
-      Environment=ATPDB_COLLECTIONS=fm.teal.alpha.feed.play,app.bsky.actor.profile
-      Environment=ATPDB_INDEXES=fm.teal.alpha.feed.play:playedTime:datetime
-      Environment=ATPDB_SEARCH_FIELDS=fm.teal.alpha.feed.play:trackName,fm.teal.alpha.feed.play:releaseName,fm.teal.alpha.feed.play:artists.*.artistName
+      Environment=ATPDB_MODE=${atpdb_mode}
+      Environment=ATPDB_RELAY=${atpdb_relay}
+%{ if atpdb_signal_collection != "" ~}
+      Environment=ATPDB_SIGNAL_COLLECTION=${atpdb_signal_collection}
+%{ endif ~}
+      Environment=ATPDB_COLLECTIONS=${atpdb_collections}
+%{ if atpdb_indexes != "" ~}
+      Environment=ATPDB_INDEXES=${atpdb_indexes}
+%{ endif ~}
+%{ if atpdb_search_fields != "" ~}
+      Environment=ATPDB_SEARCH_FIELDS=${atpdb_search_fields}
+%{ endif ~}
       Restart=always
       RestartSec=5
 

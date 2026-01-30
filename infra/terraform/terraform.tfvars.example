@@ -14,3 +14,23 @@ subdomain            = "atpdb"
 # server_type      = "cx22"
 # location         = "nbg1"
 # data_volume_size = 50
+
+# ============================================================
+# ATPDB Configuration Examples
+# ============================================================
+
+# Example 1: teal.fm (signal mode)
+# atpdb_mode              = "signal"
+# atpdb_relay             = "wss://relay1.us-east.bsky.network"
+# atpdb_signal_collection = "fm.teal.alpha.feed.play"
+# atpdb_collections       = "fm.teal.alpha.feed.play,app.bsky.actor.profile"
+# atpdb_indexes           = "fm.teal.alpha.feed.play:playedTime:datetime"
+# atpdb_search_fields     = "fm.teal.alpha.feed.play:trackName,fm.teal.alpha.feed.play:releaseName,fm.teal.alpha.feed.play:artists.*.artistName"
+
+# Example 2: Bluesky (full-network mode)
+# atpdb_mode              = "full-network"
+# atpdb_relay             = "wss://relay1.us-east.bsky.network"
+# atpdb_signal_collection = ""
+# atpdb_collections       = "app.bsky.feed.post,app.bsky.actor.profile,app.bsky.feed.like,app.bsky.feed.repost"
+# atpdb_indexes           = "app.bsky.feed.post:createdAt:datetime,app.bsky.feed.like:subject.uri:at-uri,app.bsky.feed.repost:subject.uri:at-uri"
+# atpdb_search_fields     = "app.bsky.feed.post:text"

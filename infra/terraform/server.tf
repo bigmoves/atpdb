@@ -15,10 +15,16 @@ resource "hcloud_server" "main" {
   }
 
   user_data = templatefile("${path.module}/cloud-init.yaml", {
-    hostname         = "${local.name_prefix}-server"
-    domain           = var.domain
-    grafana_password = var.grafana_password
-    github_repo      = var.github_repo
+    hostname                = "${local.name_prefix}-server"
+    domain                  = var.domain
+    grafana_password        = var.grafana_password
+    github_repo             = var.github_repo
+    atpdb_mode              = var.atpdb_mode
+    atpdb_relay             = var.atpdb_relay
+    atpdb_signal_collection = var.atpdb_signal_collection
+    atpdb_collections       = var.atpdb_collections
+    atpdb_indexes           = var.atpdb_indexes
+    atpdb_search_fields     = var.atpdb_search_fields
   })
 
   lifecycle {
