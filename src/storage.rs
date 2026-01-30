@@ -1,7 +1,9 @@
 use crate::config::{IndexConfig, IndexDirection, IndexFieldType};
 use crate::types::{AtUri, Did, Nsid};
 use fjall::{Database, Keyspace};
+use metrics::histogram;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 use thiserror::Error;
 
 #[cfg(test)]
@@ -273,14 +275,17 @@ impl Store {
     }
 
     pub fn get(&self, uri: &AtUri) -> Result<Option<Record>, StorageError> {
+        let start = Instant::now();
         let key = Self::storage_key_from_uri(uri);
-        match self.records.get(&key)? {
+        let result = match self.records.get(&key)? {
             Some(bytes) => {
                 let record: Record = serde_json::from_slice(&bytes)?;
                 Ok(Some(record))
             }
             None => Ok(None),
-        }
+        };
+        histogram!("storage_operation_seconds", "op" => "get").record(start.elapsed().as_secs_f64());
+        result
     }
 
     /// Get record by string URI (parses the URI first)
@@ -304,6 +309,8 @@ impl Store {
         record: &Record,
         indexes: &[IndexConfig],
     ) -> Result<(), StorageError> {
+        let start = Instant::now();
+
         // Check if this is an update (record already exists)
         let is_new = self.get(uri)?.is_none();
 
@@ -330,6 +337,7 @@ impl Store {
             self.increment_count(uri.collection.as_str())?;
         }
 
+        histogram!("storage_operation_seconds", "op" => "put").record(start.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -339,6 +347,8 @@ impl Store {
         uri: &AtUri,
         indexes: &[IndexConfig],
     ) -> Result<(), StorageError> {
+        let start = Instant::now();
+
         // Get record first to know index values
         let existed = if let Some(record) = self.get(uri)? {
             // Delete indexes
@@ -367,6 +377,7 @@ impl Store {
             self.decrement_count(uri.collection.as_str())?;
         }
 
+        histogram!("storage_operation_seconds", "op" => "delete").record(start.elapsed().as_secs_f64());
         Ok(())
     }
 

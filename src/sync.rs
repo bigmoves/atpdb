@@ -3,11 +3,12 @@ use crate::config::{matches_any_filter, IndexConfig, SearchFieldConfig};
 use crate::search::SearchIndex;
 use crate::storage::{Record, Store};
 use crate::types::AtUri;
+use metrics::histogram;
 use repo_stream::DriverBuilder;
 use serde::Deserialize;
 use std::io::Cursor;
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
 /// Timeout for repo fetch operations (5 minutes for large repos)
@@ -107,6 +108,8 @@ pub fn sync_repo(
     search: Option<&SearchIndex>,
     search_fields: &[SearchFieldConfig],
 ) -> Result<SyncResult, SyncError> {
+    let start = Instant::now();
+
     tracing::debug!("resolving DID {}", did);
     let resolved = resolve_did(did)?;
     tracing::debug!("PDS: {}, handle: {:?}", resolved.pds, resolved.handle);
@@ -128,6 +131,9 @@ pub fn sync_repo(
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut result =
         rt.block_on(process_car(&car_bytes, did, store, collections, indexes, search, search_fields))?;
+
+    histogram!("sync_duration_seconds").record(start.elapsed().as_secs_f64());
+    histogram!("sync_repo_size_bytes").record(car_bytes.len() as f64);
 
     result.handle = resolved.handle;
     Ok(result)

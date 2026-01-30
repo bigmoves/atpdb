@@ -150,6 +150,11 @@ impl AppState {
         Ok(())
     }
 
+    /// Returns the disk space usage of the database in bytes
+    pub fn disk_space(&self) -> Result<u64, AppError> {
+        Ok(self.db.disk_space()?)
+    }
+
     pub fn config(&self) -> Config {
         self.config.read().clone()
     }

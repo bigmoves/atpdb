@@ -1,6 +1,7 @@
 use crate::app::AppState;
 use crate::repos::RepoStatus;
 use crate::sync::sync_repo;
+use metrics::{counter, gauge};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
@@ -56,11 +57,14 @@ impl SyncWorker {
         let semaphore = Arc::new(tokio::sync::Semaphore::new(self.parallelism as usize));
 
         while let Some(did) = self.queue_rx.recv().await {
+            gauge!("sync_queue_depth").set(self.queue_rx.len() as f64);
             let permit = semaphore.clone().acquire_owned().await.unwrap();
+            gauge!("sync_workers_active").increment(1.0);
             let app = Arc::clone(&self.app);
 
             tokio::spawn(async move {
                 sync_one_repo(&app, &did).await;
+                gauge!("sync_workers_active").decrement(1.0);
                 drop(permit);
             });
         }
@@ -96,6 +100,8 @@ async fn sync_one_repo(app: &AppState, did: &str) {
     if let Ok(Some(mut state)) = app.repos.get(did) {
         match result {
             Ok(Ok(sync_result)) => {
+                counter!("sync_completed_total", "status" => "success").increment(1);
+                counter!("sync_records_total").increment(sync_result.record_count as u64);
                 state.status = RepoStatus::Synced;
                 state.rev = sync_result.rev;
                 state.record_count = sync_result.record_count as u64;
@@ -109,12 +115,14 @@ async fn sync_one_repo(app: &AppState, did: &str) {
                 }
             }
             Ok(Err(e)) => {
+                counter!("sync_completed_total", "status" => "error").increment(1);
                 state.status = RepoStatus::Error;
                 state.error = Some(format!("{}", e));
                 state.retry_count += 1;
                 state.next_retry = Some(calculate_next_retry(state.retry_count));
             }
             Err(e) => {
+                counter!("sync_completed_total", "status" => "panic").increment(1);
                 state.status = RepoStatus::Error;
                 state.error = Some(format!("task panicked: {}", e));
                 state.retry_count += 1;

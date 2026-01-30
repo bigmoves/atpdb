@@ -1,6 +1,7 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
+use metrics::{counter, histogram};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
 use tantivy::schema::{IndexRecordOption, Schema, STORED, TEXT, Field, Value, TextFieldIndexing, TextOptions};
@@ -24,6 +25,7 @@ pub enum SearchError {
 #[derive(Clone)]
 pub struct SearchIndex {
     index: Index,
+    path: PathBuf,
     writer: Arc<RwLock<IndexWriter>>,
     uri_field: Field,
     collection_field: Field,
@@ -70,6 +72,7 @@ impl SearchIndex {
 
         Ok(SearchIndex {
             index,
+            path: path.to_path_buf(),
             writer: Arc::new(RwLock::new(writer)),
             uri_field,
             collection_field,
@@ -176,6 +179,25 @@ impl SearchIndex {
         Ok(())
     }
 
+    /// Returns the disk space usage of the search index in bytes
+    pub fn disk_space(&self) -> u64 {
+        fn dir_size(path: &Path) -> u64 {
+            let mut size = 0;
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        size += dir_size(&path);
+                    } else if let Ok(meta) = entry.metadata() {
+                        size += meta.len();
+                    }
+                }
+            }
+            size
+        }
+        dir_size(&self.path)
+    }
+
     /// Search for records matching a query in a specific field
     /// Uses trigram matching for fuzzy search
     pub fn search(
@@ -186,6 +208,7 @@ impl SearchIndex {
         limit: usize,
         _fuzzy_distance: u8, // Kept for API compatibility, trigrams handle fuzziness
     ) -> Result<Vec<String>, SearchError> {
+        let start = Instant::now();
         let reader = self.index
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
@@ -288,6 +311,9 @@ impl SearchIndex {
             }
         }
 
+        counter!("search_queries_total").increment(1);
+        histogram!("search_query_seconds").record(start.elapsed().as_secs_f64());
+
         Ok(uris)
     }
 
@@ -337,6 +363,7 @@ impl SearchIndex {
                     continue;
                 }
                 count += 1;
+                counter!("search_reindex_records_total").increment(1);
 
                 if count % 50000 == 0 {
                     eprintln!("  indexed {} records...", count);

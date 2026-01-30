@@ -1,5 +1,6 @@
 use crate::cbor::dagcbor_to_json;
 use crate::types::{AtUri, Did};
+use metrics::counter;
 use serde::Deserialize;
 use std::io::Cursor;
 use std::time::Duration;
@@ -51,6 +52,11 @@ pub enum Event {
 #[derive(Debug)]
 pub enum Operation {
     Create {
+        uri: AtUri,
+        cid: String,
+        value: serde_json::Value,
+    },
+    Update {
         uri: AtUri,
         cid: String,
         value: serde_json::Value,
@@ -203,7 +209,8 @@ impl FirehoseClient {
         let mut operations = Vec::new();
         for op in body.ops {
             match op.action.as_str() {
-                "create" | "update" => {
+                "create" => {
+                    counter!("firehose_operations_total", "op" => "create").increment(1);
                     if let Some(cid_link) = &op.cid {
                         let cid = &cid_link.0;
                         if let Some(value) = blocks.get(&cid.to_string()) {
@@ -221,7 +228,27 @@ impl FirehoseClient {
                         }
                     }
                 }
+                "update" => {
+                    counter!("firehose_operations_total", "op" => "update").increment(1);
+                    if let Some(cid_link) = &op.cid {
+                        let cid = &cid_link.0;
+                        if let Some(value) = blocks.get(&cid.to_string()) {
+                            let parts: Vec<&str> = op.path.splitn(2, '/').collect();
+                            if parts.len() == 2 {
+                                let uri_str = format!("at://{}/{}", did, op.path);
+                                if let Ok(uri) = uri_str.parse() {
+                                    operations.push(Operation::Update {
+                                        uri,
+                                        cid: cid.to_string(),
+                                        value: value.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
                 "delete" => {
+                    counter!("firehose_operations_total", "op" => "delete").increment(1);
                     let uri_str = format!("at://{}/{}", did, op.path);
                     if let Ok(uri) = uri_str.parse() {
                         operations.push(Operation::Delete { uri });

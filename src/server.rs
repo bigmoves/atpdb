@@ -8,11 +8,15 @@ use crate::storage::{Record, ScanDirection};
 use crate::sync;
 use crate::sync_worker::{start_sync_worker, SyncHandle};
 use axum::{
-    extract::State,
+    extract::{Request, State},
     http::StatusCode,
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Json, Router,
 };
+use metrics::{counter, gauge, histogram};
+use std::time::Instant;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -22,8 +26,44 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
+use metrics_exporter_prometheus::PrometheusHandle;
 
 type AppStateHandle = (Arc<AppState>, Arc<SyncHandle>);
+
+type MetricsState = (PrometheusHandle, Arc<AppState>);
+
+async fn metrics_handler(
+    State((handle, _app)): State<MetricsState>,
+) -> String {
+    // Gauges are updated by a background task every 30 seconds,
+    // not here, to avoid lock contention during Prometheus scrapes.
+    handle.render()
+}
+
+async fn http_metrics_middleware(req: Request, next: Next) -> Response {
+    let method = req.method().to_string();
+    let path = normalize_path(req.uri().path());
+    let start = Instant::now();
+
+    let response = next.run(req).await;
+
+    let status = response.status().as_u16().to_string();
+    let duration = start.elapsed().as_secs_f64();
+
+    counter!("http_requests_total", "method" => method.clone(), "path" => path.clone(), "status" => status).increment(1);
+    histogram!("http_request_duration_seconds", "method" => method, "path" => path).record(duration);
+
+    response
+}
+
+/// Normalize paths to avoid label cardinality explosion
+/// e.g., /repos/did:plc:abc123 -> /repos/{did}
+fn normalize_path(path: &str) -> String {
+    if path.starts_with("/repos/") && path.len() > 7 && !path.ends_with("/errors") {
+        return "/repos/{did}".to_string();
+    }
+    path.to_string()
+}
 
 const DEFAULT_QUERY_LIMIT: usize = 100;
 const MAX_QUERY_LIMIT: usize = 1000;
@@ -423,7 +463,56 @@ async fn health(
     Ok("ok")
 }
 
+fn update_app_gauges(app: &AppState) {
+    // Called by background task every 30 seconds and on /stats requests.
+    // Not called during /metrics to avoid lock contention with queries.
+
+    // Total collections and records (excludes index entries)
+    if let Ok(collections) = app.store.unique_collections() {
+        gauge!("storage_collections_total").set(collections.len() as f64);
+        let total: usize = collections
+            .iter()
+            .filter_map(|c| app.store.count_collection(c).ok())
+            .sum();
+        gauge!("storage_records_total").set(total as f64);
+    }
+
+    // Repos by status
+    if let Ok(repos) = app.repos.list() {
+        let mut synced = 0;
+        let mut pending = 0;
+        let mut syncing = 0;
+        let mut error = 0;
+        let mut desync = 0;
+        for repo in repos {
+            match repo.status {
+                RepoStatus::Synced => synced += 1,
+                RepoStatus::Pending => pending += 1,
+                RepoStatus::Syncing => syncing += 1,
+                RepoStatus::Error => error += 1,
+                RepoStatus::Desync => desync += 1,
+            }
+        }
+        gauge!("storage_repos_total", "status" => "synced").set(synced as f64);
+        gauge!("storage_repos_total", "status" => "pending").set(pending as f64);
+        gauge!("storage_repos_total", "status" => "syncing").set(syncing as f64);
+        gauge!("storage_repos_total", "status" => "error").set(error as f64);
+        gauge!("storage_repos_total", "status" => "desync").set(desync as f64);
+    }
+
+    // Database disk space
+    if let Ok(bytes) = app.disk_space() {
+        gauge!("storage_disk_bytes").set(bytes as f64);
+    }
+
+    // Search index disk space
+    if let Some(ref search) = app.search {
+        gauge!("search_disk_bytes").set(search.disk_space() as f64);
+    }
+}
+
 async fn stats(State((app, _)): State<AppStateHandle>) -> Result<Json<StatsResponse>, StatusCode> {
+    update_app_gauges(&app);
     let records = app.store.count().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let tracked_repos = app.repos.list().map(|r| r.len()).unwrap_or(0);
     let config = app.config();
@@ -1197,6 +1286,7 @@ fn start_firehose(
 
         match FirehoseClient::connect(&relay, cursor) {
             Ok(mut client) => {
+                gauge!("firehose_connected").set(1.0);
                 println!("Connected to firehose: {}", relay);
                 let mut event_count: u64 = 0;
                 let mut last_seq: i64 = cursor.unwrap_or(0);
@@ -1211,6 +1301,7 @@ fn start_firehose(
                         })) => {
                             last_seq = seq;
                             event_count += 1;
+                            gauge!("firehose_last_seq").set(seq as f64);
 
                             // Save cursor every 1000 events
                             if event_count.is_multiple_of(1000) {
@@ -1253,7 +1344,7 @@ fn start_firehose(
                                     // Auto-sync new DIDs when we see them post to configured collections
                                     let has_matching_collection = operations.iter().any(|op| {
                                         match op {
-                                            Operation::Create { uri, .. } => {
+                                            Operation::Create { uri, .. } | Operation::Update { uri, .. } => {
                                                 matches_any_filter(uri.collection.as_str(), &config.collections)
                                             }
                                             Operation::Delete { uri } => {
@@ -1286,6 +1377,39 @@ fn start_firehose(
                             for op in operations {
                                 match op {
                                     Operation::Create { uri, cid, value } => {
+                                        // Apply collection filter
+                                        if !matches_any_filter(
+                                            uri.collection.as_str(),
+                                            &config.collections,
+                                        ) {
+                                            continue;
+                                        }
+
+                                        let record = Record {
+                                            uri: uri.to_string(),
+                                            cid,
+                                            value,
+                                            indexed_at: SystemTime::now()
+                                                .duration_since(UNIX_EPOCH)
+                                                .unwrap()
+                                                .as_secs(),
+                                        };
+                                        if let Err(e) = app.store.put_with_indexes(&uri, &record, &config.indexes) {
+                                            eprintln!("Storage error: {}", e);
+                                        }
+                                        // Index for search
+                                        if let Some(ref search) = app.search {
+                                            if let Err(e) = search.index_record(
+                                                &uri.to_string(),
+                                                uri.collection.as_str(),
+                                                &record.value,
+                                                &config.search_fields,
+                                            ) {
+                                                eprintln!("Search index error: {}", e);
+                                            }
+                                        }
+                                    }
+                                    Operation::Update { uri, cid, value } => {
                                         // Apply collection filter
                                         if !matches_any_filter(
                                             uri.collection.as_str(),
@@ -1356,6 +1480,8 @@ fn start_firehose(
                             continue;
                         }
                         Err(e) => {
+                            gauge!("firehose_connected").set(0.0);
+                            counter!("firehose_errors_total", "error" => "connection").increment(1);
                             eprintln!("Firehose error: {}", e);
                             break;
                         }
@@ -1377,6 +1503,13 @@ fn start_firehose(
 }
 
 pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
+    // Initialize Prometheus metrics exporter with histogram buckets
+    let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .set_buckets(&[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])
+        .expect("failed to set histogram buckets")
+        .install_recorder()
+        .expect("failed to install Prometheus recorder");
+
     let running = Arc::new(AtomicBool::new(false));
 
     // Start sync worker
@@ -1401,7 +1534,21 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
         .allow_headers(Any);
 
     let app_for_shutdown = Arc::clone(&app);
+    let app_for_gauges = Arc::clone(&app);
+    let metrics_state: MetricsState = (prometheus_handle, Arc::clone(&app));
     let state: AppStateHandle = (app, sync_handle);
+
+    // Background task to update gauges every 30 seconds (on blocking thread pool)
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+            let app = Arc::clone(&app_for_gauges);
+            let _ = tokio::task::spawn_blocking(move || update_app_gauges(&app)).await;
+        }
+    });
+    let metrics_router = Router::new()
+        .route("/metrics", get(metrics_handler))
+        .with_state(metrics_state);
 
     let router = Router::new()
         .route("/health", get(health))
@@ -1416,6 +1563,8 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
         .route("/repos/{did}", get(repos_get))
         .route("/config", get(config_get))
         .route("/config", post(config_update))
+        .merge(metrics_router)
+        .layer(middleware::from_fn(http_metrics_middleware))
         .layer(CompressionLayer::new())
         .layer(cors)
         .with_state(state);

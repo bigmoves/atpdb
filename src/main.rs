@@ -859,7 +859,7 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                             }
                             for op in operations {
                                 match op {
-                                    Operation::Create { uri, cid, value } => {
+                                    Operation::Create { uri, cid, value } | Operation::Update { uri, cid, value } => {
                                         let config = app.config();
                                         let record = storage::Record {
                                             uri: uri.to_string(),
