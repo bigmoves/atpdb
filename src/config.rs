@@ -55,10 +55,11 @@ pub struct IndexConfig {
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "kebab-case")]
 pub enum IndexFieldType {
     Datetime,
     Integer,
+    AtUri,
 }
 
 impl std::fmt::Display for IndexFieldType {
@@ -66,6 +67,7 @@ impl std::fmt::Display for IndexFieldType {
         match self {
             IndexFieldType::Datetime => write!(f, "datetime"),
             IndexFieldType::Integer => write!(f, "integer"),
+            IndexFieldType::AtUri => write!(f, "at-uri"),
         }
     }
 }
@@ -106,6 +108,7 @@ impl IndexConfig {
         let field_type = match parts[2] {
             "datetime" => IndexFieldType::Datetime,
             "integer" => IndexFieldType::Integer,
+            "at-uri" => IndexFieldType::AtUri,
             _ => return None,
         };
         let direction = if parts.len() == 4 {

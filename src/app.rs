@@ -1,4 +1,4 @@
-use crate::config::{Config, ConfigError, IndexDirection};
+use crate::config::{Config, ConfigError, IndexDirection, IndexFieldType};
 use crate::repos::{RepoError, RepoStore};
 use crate::search::SearchIndex;
 use crate::storage::{StorageError, Store};
@@ -56,25 +56,43 @@ impl AppState {
 
         // Build missing indexes on startup
         for index in &config.indexes {
-            // Check if index has entries with data (not empty values from old format)
-            let dir_char = match index.direction {
-                IndexDirection::Asc => 'a',
-                IndexDirection::Desc => 'd',
+            // Check if index has entries - different prefix for at-uri vs sorted indexes
+            let (prefix, index_label) = if index.field_type == IndexFieldType::AtUri {
+                // at-uri indexes use rev: prefix
+                (
+                    format!("rev:{}:{}\0", index.collection, index.field),
+                    format!("{}:{}:{}", index.collection, index.field, index.field_type),
+                )
+            } else {
+                // Sorted indexes use idx:{a|d}: prefix
+                let dir_char = match index.direction {
+                    IndexDirection::Asc => 'a',
+                    IndexDirection::Desc => 'd',
+                };
+                (
+                    format!("idx:{}:{}:{}\0", dir_char, index.collection, index.field),
+                    format!("{}:{}:{}", index.collection, index.field, index.direction),
+                )
             };
-            let prefix = format!("idx:{}:{}:{}\0", dir_char, index.collection, index.field);
+
             let needs_rebuild = match store.records_keyspace().prefix(prefix.as_bytes()).next() {
                 None => true, // No entries at all
                 Some(item) => {
                     // Check if value is empty (old format) or has data (new format)
-                    match item.value() {
-                        Ok(v) => v.is_empty(),
-                        Err(_) => true,
+                    // at-uri indexes always have empty values, so only check sorted indexes
+                    if index.field_type == IndexFieldType::AtUri {
+                        false // Has entries, no rebuild needed
+                    } else {
+                        match item.value() {
+                            Ok(v) => v.is_empty(),
+                            Err(_) => true,
+                        }
                     }
                 }
             };
 
             if needs_rebuild {
-                // Delete old index entries first (for this direction only)
+                // Delete old index entries first
                 let keys: Vec<_> = store
                     .records_keyspace()
                     .prefix(prefix.as_bytes())
@@ -84,10 +102,7 @@ impl AppState {
                     let _ = store.records_keyspace().remove(&key);
                 }
 
-                println!(
-                    "Building index {}:{}:{}...",
-                    index.collection, index.field, index.direction
-                );
+                println!("Building index {}...", index_label);
                 match store.rebuild_index(index) {
                     Ok(count) => println!("Built index with {} entries", count),
                     Err(e) => eprintln!("Error building index: {}", e),

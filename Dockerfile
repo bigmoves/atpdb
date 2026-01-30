@@ -1,10 +1,11 @@
 # Multi-stage build for optimized Rust image
-FROM rust:1.93-slim as builder
+FROM rust:1.93-slim AS builder
 
 # Install system dependencies
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    make \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

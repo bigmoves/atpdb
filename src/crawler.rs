@@ -3,7 +3,9 @@ use crate::config::Mode;
 use crate::repos::RepoState;
 use crate::sync_worker::SyncHandle;
 use serde::Deserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 use thiserror::Error;
 
 /// Ensure URL has https:// scheme for HTTP API calls
@@ -59,18 +61,27 @@ pub struct Crawler {
     app: Arc<AppState>,
     sync_handle: Arc<SyncHandle>,
     client: reqwest::blocking::Client,
+    running: Arc<AtomicBool>,
 }
 
 impl Crawler {
-    pub fn new(app: Arc<AppState>, sync_handle: Arc<SyncHandle>) -> Self {
+    pub fn new(app: Arc<AppState>, sync_handle: Arc<SyncHandle>, running: Arc<AtomicBool>) -> Self {
         Crawler {
             app,
             sync_handle,
             client: reqwest::blocking::Client::builder()
                 .user_agent("atpdb/0.1")
+                .timeout(Duration::from_secs(30))
+                .connect_timeout(Duration::from_secs(10))
                 .build()
                 .unwrap(),
+            running,
         }
+    }
+
+    /// Check if we should continue running
+    fn should_continue(&self) -> bool {
+        self.running.load(Ordering::Relaxed)
     }
 
     /// Enumerate all repos using com.atproto.sync.listRepos
@@ -84,6 +95,12 @@ impl Crawler {
         let mut total_discovered = 0;
 
         loop {
+            // Check for shutdown signal
+            if !self.should_continue() {
+                println!("Crawler: shutdown requested, stopping enumeration");
+                break;
+            }
+
             let url = match &cursor {
                 Some(c) if !c.is_empty() => format!(
                     "{}/xrpc/com.atproto.sync.listRepos?limit=1000&cursor={}",
@@ -93,7 +110,14 @@ impl Crawler {
             };
 
             println!("Crawling: {}", url);
-            let response: ListReposResponse = self.client.get(&url).send()?.json()?;
+            let response: ListReposResponse = match self.client.get(&url).send() {
+                Ok(r) => r.json()?,
+                Err(e) if !self.should_continue() => {
+                    println!("Crawler: shutdown during request");
+                    return Ok(total_discovered);
+                }
+                Err(e) => return Err(e.into()),
+            };
 
             for repo in &response.repos {
                 // Skip inactive repos
@@ -138,6 +162,12 @@ impl Crawler {
         let mut total_discovered = 0;
 
         loop {
+            // Check for shutdown signal
+            if !self.should_continue() {
+                println!("Crawler: shutdown requested, stopping enumeration");
+                break;
+            }
+
             let url = match &cursor {
                 Some(c) if !c.is_empty() => format!(
                     "{}/xrpc/com.atproto.sync.listReposByCollection?collection={}&limit=1000&cursor={}",
@@ -150,7 +180,14 @@ impl Crawler {
             };
 
             println!("Crawling by collection: {}", url);
-            let response: ListReposByCollectionResponse = self.client.get(&url).send()?.json()?;
+            let response: ListReposByCollectionResponse = match self.client.get(&url).send() {
+                Ok(r) => r.json()?,
+                Err(e) if !self.should_continue() => {
+                    println!("Crawler: shutdown during request");
+                    return Ok(total_discovered);
+                }
+                Err(e) => return Err(e.into()),
+            };
 
             for repo in &response.repos {
                 if !self.app.repos.contains(&repo.did).unwrap_or(true) {
@@ -208,9 +245,9 @@ impl Crawler {
 }
 
 /// Start crawler in background thread
-pub fn start_crawler(app: Arc<AppState>, sync_handle: Arc<SyncHandle>) {
+pub fn start_crawler(app: Arc<AppState>, sync_handle: Arc<SyncHandle>, running: Arc<AtomicBool>) {
     std::thread::spawn(move || {
-        let crawler = Crawler::new(app, sync_handle);
+        let crawler = Crawler::new(app, sync_handle, running);
         match crawler.run_based_on_mode() {
             Ok(count) => println!("Crawler: discovered {} new repos", count),
             Err(e) => eprintln!("Crawler error: {}", e),

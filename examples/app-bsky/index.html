@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Bluesky Timeline</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #0085ff;
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 0.875rem;
+            margin-bottom: 24px;
+        }
+        .query-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 24px;
+            font-family: monospace;
+            font-size: 0.875rem;
+        }
+        .query-box .query-uri {
+            color: #0085ff;
+            margin-bottom: 8px;
+        }
+        .query-box .query-params {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .query-box .query-chip {
+            background: #2a2a2a;
+            border: 1px solid #444;
+            border-radius: 4px;
+            padding: 4px 8px;
+            font-size: 0.75rem;
+            color: #888;
+        }
+        .query-box .query-chip .chip-key {
+            color: #0085ff;
+        }
+        .query-box .query-chip .chip-value {
+            color: #e0e0e0;
+        }
+        .stats {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 24px;
+            font-size: 0.875rem;
+            color: #888;
+        }
+        .feed {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .post-card {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 12px;
+            padding: 16px;
+            transition: border-color 0.2s;
+        }
+        .post-card:hover {
+            border-color: #0085ff;
+        }
+        .post-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .avatar {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #0085ff, #0066cc);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 1rem;
+            object-fit: cover;
+        }
+        .display-name {
+            font-weight: 600;
+            font-size: 0.9rem;
+        }
+        .handle {
+            font-size: 0.75rem;
+            color: #0085ff;
+        }
+        .did {
+            font-size: 0.75rem;
+            color: #666;
+            font-family: monospace;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .post-text {
+            font-size: 0.95rem;
+            line-height: 1.5;
+            margin-bottom: 12px;
+            white-space: pre-wrap;
+        }
+        .post-footer {
+            display: flex;
+            gap: 24px;
+            font-size: 0.875rem;
+            color: #666;
+        }
+        .post-stat {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .post-stat.likes {
+            color: #f91880;
+        }
+        .post-stat.reposts {
+            color: #00ba7c;
+        }
+        .timestamp {
+            font-size: 0.75rem;
+            color: #555;
+            margin-top: 12px;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        .error {
+            background: #2d1515;
+            border: 1px solid #5c2020;
+            border-radius: 8px;
+            padding: 16px;
+            color: #f87171;
+        }
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        button {
+            background: #0085ff;
+            color: #fff;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        button:hover {
+            background: #0066cc;
+        }
+        button:disabled {
+            background: #333;
+            color: #666;
+            cursor: not-allowed;
+        }
+        input {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            color: #e0e0e0;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-family: monospace;
+            flex: 1;
+        }
+        input:focus {
+            outline: none;
+            border-color: #0085ff;
+        }
+        .search-box {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .search-box input {
+            flex: 1;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Bluesky Timeline</h1>
+        <p class="subtitle">Powered by atpdb with reverse lookups</p>
+
+        <div class="controls">
+            <input type="text" id="api-url" value="http://localhost:3000" placeholder="API URL">
+            <button onclick="loadFeed()">Refresh</button>
+        </div>
+
+        <div class="search-box">
+            <input type="text" id="search-input" placeholder="Search posts..." onkeydown="if(event.key==='Enter')doSearch()">
+            <button onclick="doSearch()">Search</button>
+        </div>
+
+        <div class="query-box" id="query-display">
+            at://*/app.bsky.feed.post/*
+        </div>
+
+        <div class="stats" id="stats">
+            <span id="record-count">Loading...</span>
+            <span id="query-time"></span>
+        </div>
+
+        <div class="feed" id="feed">
+            <div class="loading">Connecting to atpdb...</div>
+        </div>
+
+        <div id="load-more-container" style="text-align: center; margin-top: 16px; display: none;">
+            <button id="load-more-btn" onclick="loadMore()">Load More</button>
+        </div>
+    </div>
+
+    <script>
+        let currentCursor = null;
+        let allRecords = [];
+        let totalCount = null;
+        const PAGE_SIZE = 50;
+
+        function truncateDid(did) {
+            if (did.length > 30) {
+                return did.slice(0, 20) + '...' + did.slice(-8);
+            }
+            return did;
+        }
+
+        function getInitials(did) {
+            const parts = did.split(':');
+            if (parts.length >= 3) {
+                return parts[2].slice(0, 2).toUpperCase();
+            }
+            return '??';
+        }
+
+        function formatTime(timestamp) {
+            const date = new Date(timestamp * 1000);
+            return date.toLocaleString();
+        }
+
+        function extractDidFromUri(uri) {
+            const match = uri.match(/at:\/\/([^/]+)/);
+            return match ? match[1] : 'unknown';
+        }
+
+        function renderPost(record) {
+            const did = extractDidFromUri(record.uri);
+            const value = record.value;
+            const author = record.author;
+            const handle = record.handle;
+
+            const text = value.text || '';
+            const createdAt = value.createdAt;
+
+            // Use hydrated profile data
+            const displayName = author?.value?.displayName || truncateDid(did);
+            const avatarUrl = author?.value?.avatar?.url;
+
+            const avatarHtml = avatarUrl
+                ? `<img src="${avatarUrl}" class="avatar" alt="${escapeHtml(displayName)}">`
+                : `<div class="avatar">${getInitials(did)}</div>`;
+
+            const handleHtml = handle
+                ? `<div class="handle">@${escapeHtml(handle)}</div>`
+                : `<div class="did">${truncateDid(did)}</div>`;
+
+            // Get counts from reverse lookups
+            const likeCount = record.likes || 0;
+            const repostCount = record.reposts || 0;
+
+            return `
+                <div class="post-card">
+                    <div class="post-header">
+                        ${avatarHtml}
+                        <div>
+                            <div class="display-name">${escapeHtml(displayName)}</div>
+                            ${handleHtml}
+                        </div>
+                    </div>
+                    <div class="post-text">${escapeHtml(text)}</div>
+                    <div class="post-footer">
+                        <div class="post-stat likes">
+                            <span>&#x2665;</span>
+                            <span>${likeCount}</span>
+                        </div>
+                        <div class="post-stat reposts">
+                            <span>&#x21BB;</span>
+                            <span>${repostCount}</span>
+                        </div>
+                    </div>
+                    <div class="timestamp">${createdAt ? new Date(createdAt).toLocaleString() : formatTime(record.indexedAt)}</div>
+                </div>
+            `;
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function buildQueryDisplayHtml(baseUri, params) {
+            const chips = [];
+            for (const [key, value] of Object.entries(params)) {
+                if (value !== undefined && value !== null) {
+                    chips.push(`<span class="query-chip"><span class="chip-key">${escapeHtml(key)}</span>: <span class="chip-value">${escapeHtml(String(value))}</span></span>`);
+                }
+            }
+            const paramsHtml = chips.length > 0
+                ? `<div class="query-params">${chips.join('')}</div>`
+                : '';
+            return `<div class="query-uri">${escapeHtml(baseUri)}</div>${paramsHtml}`;
+        }
+
+        async function loadFeed() {
+            currentCursor = null;
+            allRecords = [];
+            totalCount = null;
+
+            const feedEl = document.getElementById('feed');
+            const loadMoreContainer = document.getElementById('load-more-container');
+
+            feedEl.innerHTML = '<div class="loading">Loading...</div>';
+            loadMoreContainer.style.display = 'none';
+
+            await fetchPage(true);
+        }
+
+        async function loadMore() {
+            const btn = document.getElementById('load-more-btn');
+            btn.disabled = true;
+            btn.textContent = 'Loading...';
+            await fetchPage(false);
+            btn.disabled = false;
+            btn.textContent = 'Load More';
+        }
+
+        async function fetchPage(isFirstPage) {
+            const feedEl = document.getElementById('feed');
+            const statsEl = document.getElementById('record-count');
+            const timeEl = document.getElementById('query-time');
+            const loadMoreContainer = document.getElementById('load-more-container');
+            const queryDisplay = document.getElementById('query-display');
+            const apiUrl = document.getElementById('api-url').value;
+
+            const startTime = performance.now();
+            const baseUri = 'at://*/app.bsky.feed.post/*';
+
+            try {
+                const body = {
+                    q: baseUri,
+                    limit: PAGE_SIZE,
+                    sort: 'createdAt:datetime:desc',
+                    hydrate: {
+                        author: 'at://$.did/app.bsky.actor.profile/self'
+                    },
+                    blobs: {
+                        'author.avatar': 'avatar'
+                    },
+                    'count.likes': 'at://*/app.bsky.feed.like/*?subject.uri=$.uri',
+                    'count.reposts': 'at://*/app.bsky.feed.repost/*?subject.uri=$.uri',
+                    include_count: isFirstPage
+                };
+                if (currentCursor) {
+                    body.cursor = currentCursor;
+                }
+
+                if (isFirstPage) {
+                    queryDisplay.innerHTML = buildQueryDisplayHtml(baseUri, {
+                        sort: body.sort,
+                        'hydrate.author': body.hydrate.author,
+                        'count.likes': body['count.likes'],
+                        'count.reposts': body['count.reposts']
+                    });
+                }
+
+                const response = await fetch(`${apiUrl}/query`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                const endTime = performance.now();
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Query failed');
+                }
+
+                const data = await response.json();
+
+                currentCursor = data.cursor;
+
+                if (data.total !== undefined) {
+                    totalCount = data.total;
+                }
+
+                allRecords = allRecords.concat(data.records);
+
+                const hasMore = data.cursor !== null;
+                if (totalCount !== null) {
+                    statsEl.textContent = `${totalCount.toLocaleString()} posts total`;
+                } else {
+                    statsEl.textContent = `${allRecords.length} records${hasMore ? '+' : ''}`;
+                }
+                timeEl.textContent = `(${(endTime - startTime).toFixed(0)}ms)`;
+
+                if (allRecords.length === 0) {
+                    feedEl.innerHTML = '<div class="loading">No posts found. Connect to firehose and wait for some posts!</div>';
+                    loadMoreContainer.style.display = 'none';
+                    return;
+                }
+
+                feedEl.innerHTML = allRecords.map(renderPost).join('');
+                loadMoreContainer.style.display = hasMore ? 'block' : 'none';
+
+            } catch (err) {
+                if (isFirstPage) {
+                    feedEl.innerHTML = `<div class="error">
+                        <strong>Error:</strong> ${escapeHtml(err.message)}<br><br>
+                        Make sure atpdb is running with:<br>
+                        <code>ATPDB_MODE=full-network \\<br>
+                        ATPDB_COLLECTIONS=app.bsky.feed.post,app.bsky.actor.profile,app.bsky.feed.like,app.bsky.feed.repost \\<br>
+                        ATPDB_INDEXES=app.bsky.feed.post:createdAt:datetime,app.bsky.feed.like:subject.uri:at-uri,app.bsky.feed.repost:subject.uri:at-uri \\<br>
+                        cargo run -- serve</code>
+                    </div>`;
+                }
+                statsEl.textContent = 'Error';
+                timeEl.textContent = '';
+                loadMoreContainer.style.display = 'none';
+            }
+        }
+
+        async function doSearch() {
+            const searchInput = document.getElementById('search-input');
+            const query = searchInput.value.trim();
+
+            if (!query) {
+                return;
+            }
+
+            const feedEl = document.getElementById('feed');
+            const statsEl = document.getElementById('record-count');
+            const timeEl = document.getElementById('query-time');
+            const loadMoreContainer = document.getElementById('load-more-container');
+            const queryDisplay = document.getElementById('query-display');
+            const apiUrl = document.getElementById('api-url').value;
+
+            feedEl.innerHTML = '<div class="loading">Searching...</div>';
+            loadMoreContainer.style.display = 'none';
+
+            const baseUri = 'at://*/app.bsky.feed.post/*';
+
+            queryDisplay.innerHTML = `
+                ${buildQueryDisplayHtml(baseUri, {
+                    'search.text': query,
+                    'count.likes': 'at://*/app.bsky.feed.like/*?subject.uri=$.uri',
+                    'count.reposts': 'at://*/app.bsky.feed.repost/*?subject.uri=$.uri'
+                })}
+                <div style="margin-top: 8px;">
+                    <button onclick="clearSearch()">Clear Search</button>
+                </div>
+            `;
+
+            const startTime = performance.now();
+
+            try {
+                const body = {
+                    q: baseUri,
+                    'search.text': query,
+                    limit: 50,
+                    hydrate: {
+                        author: 'at://$.did/app.bsky.actor.profile/self'
+                    },
+                    blobs: {
+                        'author.avatar': 'avatar'
+                    },
+                    'count.likes': 'at://*/app.bsky.feed.like/*?subject.uri=$.uri',
+                    'count.reposts': 'at://*/app.bsky.feed.repost/*?subject.uri=$.uri'
+                };
+
+                const response = await fetch(`${apiUrl}/query`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                const endTime = performance.now();
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Search failed');
+                }
+
+                const data = await response.json();
+
+                statsEl.textContent = `${data.total || data.records.length} results`;
+                timeEl.textContent = `(${(endTime - startTime).toFixed(0)}ms)`;
+
+                if (data.records.length === 0) {
+                    feedEl.innerHTML = `<div class="loading">No results found for "${escapeHtml(query)}"</div>`;
+                    return;
+                }
+
+                feedEl.innerHTML = data.records.map(renderPost).join('');
+
+            } catch (err) {
+                feedEl.innerHTML = `<div class="error">
+                    <strong>Search Error:</strong> ${escapeHtml(err.message)}<br><br>
+                    Make sure search is configured: <code>ATPDB_SEARCH_FIELDS=app.bsky.feed.post:text</code>
+                </div>`;
+                statsEl.textContent = 'Error';
+                timeEl.textContent = '';
+            }
+        }
+
+        function clearSearch() {
+            document.getElementById('search-input').value = '';
+            document.getElementById('query-display').innerHTML = 'at://*/app.bsky.feed.post/*';
+            loadFeed();
+        }
+
+        loadFeed();
+    </script>
+</body>
+</html>

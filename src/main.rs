@@ -129,9 +129,11 @@ fn handle_command(line: &str, app: &Arc<AppState>, running: &Arc<AtomicBool>) ->
             println!("  .handles fetch <did>      Fetch and store handle from PLC directory");
             println!();
             println!("Counts:");
-            println!("  .count <collection>       Show collection count");
-            println!("  .count rebuild <col>      Rebuild count for collection");
-            println!("  .count rebuild-all        Rebuild counts for all collections");
+            println!("  .count <collection>              Show collection count");
+            println!("  .count rebuild <col>             Rebuild count for collection");
+            println!("  .count rebuild-all               Rebuild all counts");
+            println!("  .count rebuild-reverse <col:fld> Rebuild reverse lookup counts");
+            println!("  .count rebuild-reverse-all       Rebuild all reverse lookup counts");
             println!();
             println!("Queries:");
             println!("  at://did/collection/rkey   Get single record");
@@ -644,15 +646,66 @@ fn handle_command(line: &str, app: &Arc<AppState>, running: &Arc<AtomicBool>) ->
                     }
                     Err(e) => println!("Error: {}", e),
                 },
+                Some("rebuild-reverse") => {
+                    // Rebuild reverse counts for a collection:field pair
+                    if let Some(spec) = parts.get(1) {
+                        let spec_parts: Vec<&str> = spec.split(':').collect();
+                        if spec_parts.len() == 2 {
+                            let collection = spec_parts[0];
+                            let field = spec_parts[1];
+                            println!("Rebuilding reverse counts for {}:{}...", collection, field);
+                            match app.store.rebuild_reverse_counts(collection, field) {
+                                Ok(count) => println!("Rebuilt {} unique value counts", count),
+                                Err(e) => println!("Error: {}", e),
+                            }
+                        } else {
+                            println!("Usage: .count rebuild-reverse <collection:field>");
+                        }
+                    } else {
+                        println!("Usage: .count rebuild-reverse <collection:field>");
+                    }
+                }
+                Some("rebuild-reverse-all") => {
+                    // Rebuild reverse counts for all configured at-uri indexes
+                    let config = app.config();
+                    let at_uri_indexes: Vec<_> = config
+                        .indexes
+                        .iter()
+                        .filter(|i| i.field_type == config::IndexFieldType::AtUri)
+                        .collect();
+                    if at_uri_indexes.is_empty() {
+                        println!("No at-uri indexes configured");
+                    } else {
+                        for index in at_uri_indexes {
+                            print!(
+                                "Rebuilding reverse counts for {}:{}... ",
+                                index.collection, index.field
+                            );
+                            match app
+                                .store
+                                .rebuild_reverse_counts(&index.collection, &index.field)
+                            {
+                                Ok(count) => println!("{} unique values", count),
+                                Err(e) => println!("Error: {}", e),
+                            }
+                        }
+                    }
+                }
                 Some(collection) => match app.store.count_collection(collection) {
                     Ok(count) => println!("{}: {}", collection, count),
                     Err(e) => println!("Error: {}", e),
                 },
                 None => {
                     println!("Usage:");
-                    println!("  .count <collection>       Show collection count");
-                    println!("  .count rebuild <col>      Rebuild count for collection");
-                    println!("  .count rebuild-all        Rebuild counts for all collections");
+                    println!("  .count <collection>              Show collection count");
+                    println!("  .count rebuild <col>             Rebuild count for collection");
+                    println!(
+                        "  .count rebuild-all               Rebuild counts for all collections"
+                    );
+                    println!("  .count rebuild-reverse <col:fld> Rebuild reverse lookup counts");
+                    println!(
+                        "  .count rebuild-reverse-all       Rebuild all reverse lookup counts"
+                    );
                 }
             }
             CommandResult::Continue

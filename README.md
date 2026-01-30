@@ -27,7 +27,7 @@ curl -X POST localhost:3000/query -H "Content-Type: application/json" \
   -d '{"q": "at://did:plc:xyz/fm.teal.alpha.feed.play"}'
 ```
 
-See [examples/fm-teal](examples/fm-teal) for a full demo UI.
+See [examples/fm-teal](examples/fm-teal) for a full demo UI, or [examples/app-bsky](examples/app-bsky) for a Bluesky timeline with like/repost counts.
 
 ## Configuration
 
@@ -63,6 +63,11 @@ Sort query results by a field:
 ATPDB_INDEXES="fm.teal.alpha.feed.play:playedAt:datetime:desc" atpdb serve
 ```
 
+Index types:
+- `datetime` - ISO 8601 timestamps, supports sorted queries
+- `integer` - Numbers, supports sorted queries
+- `at-uri` - AT-URI strings, supports reverse lookups (count/hydrate by reference)
+
 ### Search
 
 Enable fuzzy text search on specific fields:
@@ -94,7 +99,8 @@ Queries use AT-URI patterns:
 | `cursor` | Pagination cursor from previous response |
 | `sort` | Field to sort by (requires index) |
 | `search.<field>` | Fuzzy text search on field (requires search field config) |
-| `hydrate.<key>` | Attach related record at `<key>` using pattern `at://$.did/collection/rkey` |
+| `hydrate.<key>` | Attach related record at `<key>` (see Hydration below) |
+| `count.<key>` | Count records matching reverse lookup pattern (see Reverse Lookups below) |
 | `blobs.<path>` | Transform blob ref to CDN URL (presets: `avatar`, `banner`, `feed_thumbnail`) |
 
 ```bash
@@ -110,6 +116,42 @@ curl -X POST localhost:3000/query -H "Content-Type: application/json" \
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
   -d '{"q": "at://*/fm.teal.alpha.feed.play", "hydrate.author": "at://$.did/app.bsky.actor.profile/self", "blobs.author.avatar": "avatar"}'
 ```
+
+### Hydration Patterns
+
+Hydration attaches related records to each result:
+
+| Pattern | Description |
+|---------|-------------|
+| `at://$.did/collection/rkey` | Forward lookup: fetch record by DID from result |
+| `at://*/collection/*?field=$.uri` | Reverse lookup: fetch records that reference the result |
+
+### Reverse Lookups (count.* and reverse hydrate.*)
+
+Count or fetch records that reference a field (e.g., likes on posts). Requires an `at-uri` index on the referencing field.
+
+```bash
+# Configure index on likes' subject.uri field
+ATPDB_INDEXES="app.bsky.feed.like:subject.uri:at-uri" atpdb serve
+
+# Count likes on posts
+curl -X POST localhost:3000/query -H "Content-Type: application/json" \
+  -d '{
+    "q": "at://*/app.bsky.feed.post/*",
+    "count.likes": "at://*/app.bsky.feed.like/*?subject.uri=$.uri"
+  }'
+
+# Fetch the actual like records (reverse hydration)
+curl -X POST localhost:3000/query -H "Content-Type: application/json" \
+  -d '{
+    "q": "at://*/app.bsky.feed.post/*",
+    "hydrate.likers": "at://*/app.bsky.feed.like/*?subject.uri=$.uri&limit=10"
+  }'
+```
+
+Pattern syntax: `at://*/collection/*?field=$.value&limit=N`
+- `field=$.value` - Match records where `field` equals the result's `value` (use `$.uri` for the record URI)
+- `limit=N` - For hydration, max records to return (default 10)
 
 ## HTTP API
 

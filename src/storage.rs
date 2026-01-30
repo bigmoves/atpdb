@@ -2,7 +2,9 @@ use crate::config::{IndexConfig, IndexDirection, IndexFieldType};
 use crate::types::{AtUri, Did, Nsid};
 use fjall::{Database, Keyspace};
 use metrics::histogram;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Instant;
 use thiserror::Error;
 
@@ -40,6 +42,8 @@ pub struct Store {
     /// Records keyed by: {collection}\0{did}\0{rkey}
     /// This enables fast prefix scans for both collection-wide and per-user queries
     records: Keyspace,
+    /// Lock to ensure atomic counter updates (read-modify-write)
+    counter_lock: Arc<Mutex<()>>,
 }
 
 impl Store {
@@ -50,11 +54,16 @@ impl Store {
         Ok(Store {
             db: Some(db),
             records,
+            counter_lock: Arc::new(Mutex::new(())),
         })
     }
 
     pub fn from_keyspace(records: Keyspace) -> Self {
-        Store { db: None, records }
+        Store {
+            db: None,
+            records,
+            counter_lock: Arc::new(Mutex::new(())),
+        }
     }
 
     /// Build storage key: {collection}\0{did}\0{rkey}
@@ -141,6 +150,36 @@ impl Store {
         .into_bytes()
     }
 
+    /// Build reverse lookup index key: rev:{collection}:{field}\0{field_value}\0{did}\0{rkey}
+    fn reverse_index_key(
+        collection: &str,
+        field: &str,
+        field_value: &str,
+        did: &str,
+        rkey: &str,
+    ) -> Vec<u8> {
+        format!(
+            "rev:{}:{}\0{}\0{}\0{}",
+            Self::sanitize_key_value(collection),
+            Self::sanitize_key_value(field),
+            Self::sanitize_key_value(field_value),
+            did,
+            rkey
+        )
+        .into_bytes()
+    }
+
+    /// Build reverse lookup index prefix for scanning by field value
+    fn reverse_index_prefix(collection: &str, field: &str, field_value: &str) -> Vec<u8> {
+        format!(
+            "rev:{}:{}\0{}\0",
+            Self::sanitize_key_value(collection),
+            Self::sanitize_key_value(field),
+            Self::sanitize_key_value(field_value)
+        )
+        .into_bytes()
+    }
+
     /// Build indexedAt keys (both directions)
     fn indexed_at_key_asc(collection: &str, timestamp: u64, did: &str, rkey: &str) -> Vec<u8> {
         format!(
@@ -174,6 +213,7 @@ impl Store {
 
     /// Write index entry for a record (only for configured direction)
     /// Stores the full record in the index value for fast reads (no secondary lookup)
+    /// For AtUri type, uses reverse index key for exact-match lookups
     pub fn write_index_entry(
         &self,
         index: &IndexConfig,
@@ -183,16 +223,24 @@ impl Store {
     ) -> Result<(), StorageError> {
         let sort_value = self.extract_sort_value(&record.value, &index.field, index.field_type)?;
         if let Some(sv) = sort_value {
-            let record_bytes = serde_json::to_vec(record)?;
-            let key = match index.direction {
-                IndexDirection::Asc => {
-                    Self::index_key_asc(&index.collection, &index.field, &sv, did, rkey)
-                }
-                IndexDirection::Desc => {
-                    Self::index_key_desc(&index.collection, &index.field, &sv, did, rkey)
-                }
-            };
-            self.records.insert(&key, &record_bytes)?;
+            // AtUri indexes use reverse index keys (no direction, exact match only)
+            if index.field_type == IndexFieldType::AtUri {
+                let key = Self::reverse_index_key(&index.collection, &index.field, &sv, did, rkey);
+                self.records.insert(&key, b"")?;
+                // Maintain count for O(1) lookups
+                self.increment_reverse_count(&index.collection, &index.field, &sv)?;
+            } else {
+                let record_bytes = serde_json::to_vec(record)?;
+                let key = match index.direction {
+                    IndexDirection::Asc => {
+                        Self::index_key_asc(&index.collection, &index.field, &sv, did, rkey)
+                    }
+                    IndexDirection::Desc => {
+                        Self::index_key_desc(&index.collection, &index.field, &sv, did, rkey)
+                    }
+                };
+                self.records.insert(&key, &record_bytes)?;
+            }
         }
         Ok(())
     }
@@ -236,10 +284,12 @@ impl Store {
                     Ok(None)
                 }
             }
+            IndexFieldType::AtUri => Ok(current.as_str().map(|s| s.to_string())),
         }
     }
 
     /// Delete index entry for a record (only for configured direction)
+    /// For AtUri type, deletes from reverse index
     pub fn delete_index_entry(
         &self,
         index: &IndexConfig,
@@ -249,15 +299,23 @@ impl Store {
     ) -> Result<(), StorageError> {
         let sort_value = self.extract_sort_value(&record.value, &index.field, index.field_type)?;
         if let Some(sv) = sort_value {
-            let key = match index.direction {
-                IndexDirection::Asc => {
-                    Self::index_key_asc(&index.collection, &index.field, &sv, did, rkey)
-                }
-                IndexDirection::Desc => {
-                    Self::index_key_desc(&index.collection, &index.field, &sv, did, rkey)
-                }
-            };
-            self.records.remove(&key)?;
+            // AtUri indexes use reverse index keys
+            if index.field_type == IndexFieldType::AtUri {
+                let key = Self::reverse_index_key(&index.collection, &index.field, &sv, did, rkey);
+                self.records.remove(&key)?;
+                // Maintain count for O(1) lookups
+                self.decrement_reverse_count(&index.collection, &index.field, &sv)?;
+            } else {
+                let key = match index.direction {
+                    IndexDirection::Asc => {
+                        Self::index_key_asc(&index.collection, &index.field, &sv, did, rkey)
+                    }
+                    IndexDirection::Desc => {
+                        Self::index_key_desc(&index.collection, &index.field, &sv, did, rkey)
+                    }
+                };
+                self.records.remove(&key)?;
+            }
         }
         Ok(())
     }
@@ -573,17 +631,60 @@ impl Store {
         format!("__count__:{}", collection).into_bytes()
     }
 
-    /// Increment collection counter
+    /// Key for reverse lookup counters: __revcount__:collection:field\0value
+    fn reverse_count_key(collection: &str, field: &str, field_value: &str) -> Vec<u8> {
+        format!(
+            "__revcount__:{}:{}\0{}",
+            Self::sanitize_key_value(collection),
+            Self::sanitize_key_value(field),
+            Self::sanitize_key_value(field_value)
+        )
+        .into_bytes()
+    }
+
+    /// Increment collection counter (atomic via lock)
     fn increment_count(&self, collection: &str) -> Result<(), StorageError> {
+        let _guard = self.counter_lock.lock();
         let key = Self::count_key(collection);
         let current = self.get_count_raw(&key)?;
         self.records.insert(&key, (current + 1).to_le_bytes())?;
         Ok(())
     }
 
-    /// Decrement collection counter
+    /// Decrement collection counter (atomic via lock)
     fn decrement_count(&self, collection: &str) -> Result<(), StorageError> {
+        let _guard = self.counter_lock.lock();
         let key = Self::count_key(collection);
+        let current = self.get_count_raw(&key)?;
+        if current > 0 {
+            self.records.insert(&key, (current - 1).to_le_bytes())?;
+        }
+        Ok(())
+    }
+
+    /// Increment reverse lookup counter (atomic via lock)
+    fn increment_reverse_count(
+        &self,
+        collection: &str,
+        field: &str,
+        field_value: &str,
+    ) -> Result<(), StorageError> {
+        let _guard = self.counter_lock.lock();
+        let key = Self::reverse_count_key(collection, field, field_value);
+        let current = self.get_count_raw(&key)?;
+        self.records.insert(&key, (current + 1).to_le_bytes())?;
+        Ok(())
+    }
+
+    /// Decrement reverse lookup counter (atomic via lock)
+    fn decrement_reverse_count(
+        &self,
+        collection: &str,
+        field: &str,
+        field_value: &str,
+    ) -> Result<(), StorageError> {
+        let _guard = self.counter_lock.lock();
+        let key = Self::reverse_count_key(collection, field, field_value);
         let current = self.get_count_raw(&key)?;
         if current > 0 {
             self.records.insert(&key, (current - 1).to_le_bytes())?;
@@ -649,6 +750,7 @@ impl Store {
                     || key_str.starts_with("__")
                     || key_str.starts_with("index:")
                     || key_str.starts_with("cursor:")
+                    || key_str.starts_with("rev:")
                 {
                     continue;
                 }
@@ -850,6 +952,144 @@ impl Store {
         }
 
         Ok(count)
+    }
+
+    /// Rebuild reverse lookup counts by scanning reverse index entries
+    /// Use this after migrating data or if counts are out of sync
+    pub fn rebuild_reverse_counts(
+        &self,
+        collection: &str,
+        field: &str,
+    ) -> Result<usize, StorageError> {
+        use std::collections::HashMap;
+
+        let prefix = format!(
+            "rev:{}:{}\0",
+            Self::sanitize_key_value(collection),
+            Self::sanitize_key_value(field)
+        );
+
+        // Count entries per field_value
+        let mut counts: HashMap<String, u64> = HashMap::new();
+
+        for item in self.records.prefix(prefix.as_bytes()) {
+            let key = match item.key() {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            let key_str = String::from_utf8_lossy(&key);
+            // Key format: rev:collection:field\0value\0did\0rkey
+            let parts: Vec<&str> = key_str.split('\0').collect();
+            if parts.len() >= 2 {
+                let field_value = parts[1].to_string();
+                *counts.entry(field_value).or_insert(0) += 1;
+            }
+        }
+
+        // Write all counts
+        for (field_value, count) in &counts {
+            let key = Self::reverse_count_key(collection, field, field_value);
+            self.records.insert(&key, (*count).to_le_bytes())?;
+        }
+
+        Ok(counts.len())
+    }
+
+    /// Count records where a field equals a specific value
+    /// O(1) if counter exists, falls back to O(n) scan for pre-migration data
+    pub fn count_by_field_value(
+        &self,
+        collection: &str,
+        field: &str,
+        field_value: &str,
+    ) -> Result<usize, StorageError> {
+        let key = Self::reverse_count_key(collection, field, field_value);
+        let count = self.get_count_raw(&key)? as usize;
+
+        // If counter exists and is non-zero, use it (O(1))
+        if count > 0 {
+            return Ok(count);
+        }
+
+        // Fallback: scan reverse index for pre-migration data
+        // This handles data indexed before counters were added
+        let prefix = Self::reverse_index_prefix(collection, field, field_value);
+        Ok(self.records.prefix(&prefix).count())
+    }
+
+    /// Get records where a field equals a specific value (using reverse index)
+    /// Supports cursor-based pagination: pass the URI of the last record to get the next page
+    pub fn get_by_field_value(
+        &self,
+        collection: &str,
+        field: &str,
+        field_value: &str,
+        limit: usize,
+        cursor_uri: Option<&str>,
+    ) -> Result<Vec<Record>, StorageError> {
+        let prefix = Self::reverse_index_prefix(collection, field, field_value);
+        let mut records = Vec::new();
+
+        // Build cursor key if provided
+        let cursor_key = cursor_uri.and_then(|uri| {
+            parse_did_rkey_from_uri(uri).map(|(did, rkey)| {
+                Self::reverse_index_key(collection, field, field_value, &did, &rkey)
+            })
+        });
+
+        let mut past_cursor = cursor_key.is_none();
+
+        for item in self.records.prefix(&prefix) {
+            let key = match item.key() {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+
+            // Skip until we pass the cursor
+            if !past_cursor {
+                if let Some(ref ck) = cursor_key {
+                    if key.as_ref() <= ck.as_slice() {
+                        continue;
+                    }
+                }
+                past_cursor = true;
+            }
+
+            if records.len() >= limit {
+                break;
+            }
+
+            // Parse key to extract did and rkey: rev:collection:field\0value\0did\0rkey
+            let key_str = String::from_utf8_lossy(&key);
+            let parts: Vec<&str> = key_str.split('\0').collect();
+            if parts.len() >= 4 {
+                let did = parts[2];
+                let rkey = parts[3];
+                // Fetch the actual record
+                if let Some(record) = self.get_by_key(collection, did, rkey)? {
+                    records.push(record);
+                }
+            }
+        }
+
+        Ok(records)
+    }
+
+    /// Get record by collection, did, and rkey
+    pub fn get_by_key(
+        &self,
+        collection: &str,
+        did: &str,
+        rkey: &str,
+    ) -> Result<Option<Record>, StorageError> {
+        let key = Self::storage_key(collection, did, rkey);
+        match self.records.get(&key)? {
+            Some(bytes) => {
+                let record: Record = serde_json::from_slice(&bytes)?;
+                Ok(Some(record))
+            }
+            None => Ok(None),
+        }
     }
 }
 

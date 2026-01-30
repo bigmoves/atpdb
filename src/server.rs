@@ -230,6 +230,9 @@ fn transform_blob_at_path(value: &mut serde_json::Value, path: &str, did: &str, 
 }
 
 /// Hydrate records with related data
+/// Supports two pattern types:
+/// 1. Forward hydration: "at://$.did/collection/rkey" - fetch a specific record by DID
+/// 2. Reverse hydration: "at://*/collection/*?field=$.uri" - fetch records that reference this record
 fn hydrate_records(
     records: &mut [serde_json::Value],
     hydrate: &HashMap<String, String>,
@@ -237,82 +240,146 @@ fn hydrate_records(
     app: &AppState,
 ) {
     let store = &app.store;
-    // Pre-parse hydration patterns to avoid repeated parsing
-    let parsed_patterns: Vec<(&str, &str, String, String)> = hydrate
-        .iter()
-        .filter_map(|(key, pattern)| {
-            parse_hydration_pattern(pattern)
-                .map(|(collection, rkey)| (key.as_str(), pattern.as_str(), collection, rkey))
-        })
-        .collect();
 
-    if parsed_patterns.is_empty() {
-        return;
+    // Separate forward and reverse hydration patterns
+    let mut forward_patterns: Vec<(&str, &str, String, String)> = Vec::new();
+    let mut reverse_patterns: Vec<(&str, ReverseLookup)> = Vec::new();
+
+    for (key, pattern) in hydrate {
+        if pattern.contains('*') && pattern.contains('?') {
+            // Reverse lookup pattern
+            if let Some(lookup) = parse_reverse_lookup(pattern) {
+                reverse_patterns.push((key.as_str(), lookup));
+            }
+        } else if let Some((collection, rkey)) = parse_hydration_pattern(pattern) {
+            // Forward hydration pattern
+            forward_patterns.push((key.as_str(), pattern.as_str(), collection, rkey));
+        }
     }
 
-    // Collect all DIDs and their hydration targets using references
-    let mut hydration_lookups: HashMap<String, Vec<(usize, &str)>> = HashMap::new();
+    // Handle forward hydration (existing logic)
+    if !forward_patterns.is_empty() {
+        // Collect all DIDs and their hydration targets using references
+        let mut hydration_lookups: HashMap<String, Vec<(usize, &str)>> = HashMap::new();
 
-    for (idx, record) in records.iter().enumerate() {
-        if let Some(uri) = record.get("uri").and_then(|u| u.as_str()) {
-            if let Some(did) = extract_did_from_uri(uri) {
-                for (key, _, collection, rkey) in &parsed_patterns {
-                    let target_uri = format!("at://{}/{}/{}", did, collection, rkey);
-                    hydration_lookups
-                        .entry(target_uri)
-                        .or_default()
-                        .push((idx, *key));
+        for (idx, record) in records.iter().enumerate() {
+            if let Some(uri) = record.get("uri").and_then(|u| u.as_str()) {
+                if let Some(did) = extract_did_from_uri(uri) {
+                    for (key, _, collection, rkey) in &forward_patterns {
+                        let target_uri = format!("at://{}/{}/{}", did, collection, rkey);
+                        hydration_lookups
+                            .entry(target_uri)
+                            .or_default()
+                            .push((idx, *key));
+                    }
+                }
+            }
+        }
+
+        // Parallel lookup all hydration targets
+        let hydrated_records: HashMap<String, serde_json::Value> = hydration_lookups
+            .keys()
+            .par_bridge()
+            .filter_map(|target_uri| {
+                store
+                    .get_by_uri_string(target_uri)
+                    .ok()
+                    .flatten()
+                    .map(|record| {
+                        let mut record_json = build_record_json(
+                            &record.uri,
+                            &record.cid,
+                            record.value,
+                            record.indexed_at,
+                            app,
+                        );
+
+                        // Transform blobs in hydrated record
+                        let did = extract_did_from_uri(target_uri).unwrap_or_default();
+                        for (path, preset) in blobs {
+                            for (key, _, _, _) in &forward_patterns {
+                                if let Some(sub_path) = path.strip_prefix(&format!("{}.", key)) {
+                                    // Normalize: add value. prefix if not already present
+                                    let normalized = if sub_path.starts_with("value.") {
+                                        sub_path.to_string()
+                                    } else {
+                                        format!("value.{}", sub_path)
+                                    };
+                                    transform_blob_at_path(
+                                        &mut record_json,
+                                        &normalized,
+                                        &did,
+                                        preset,
+                                    );
+                                }
+                            }
+                        }
+
+                        (target_uri.clone(), record_json)
+                    })
+            })
+            .collect();
+
+        // Attach hydrated records to main records
+        for (target_uri, indices) in hydration_lookups {
+            if let Some(hydrated) = hydrated_records.get(&target_uri) {
+                for (idx, key) in indices {
+                    if let Some(record) = records.get_mut(idx) {
+                        record[key] = hydrated.clone();
+                    }
                 }
             }
         }
     }
 
-    // Parallel lookup all hydration targets
-    let hydrated_records: HashMap<String, serde_json::Value> = hydration_lookups
-        .keys()
-        .par_bridge()
-        .filter_map(|target_uri| {
-            store
-                .get_by_uri_string(target_uri)
-                .ok()
-                .flatten()
-                .map(|record| {
-                    let mut record_json = build_record_json(
-                        &record.uri,
-                        &record.cid,
-                        record.value,
-                        record.indexed_at,
-                        app,
-                    );
+    // Handle reverse hydration (parallel)
+    if !reverse_patterns.is_empty() {
+        // Collect all lookups: (record_index, key, collection, field, match_value, limit)
+        let mut reverse_lookups: Vec<(usize, &str, String, String, String, usize)> = Vec::new();
 
-                    // Transform blobs in hydrated record
-                    let did = extract_did_from_uri(target_uri).unwrap_or_default();
-                    for (path, preset) in blobs {
-                        for (key, _, _, _) in &parsed_patterns {
-                            if let Some(sub_path) = path.strip_prefix(&format!("{}.", key)) {
-                                // Normalize: add value. prefix if not already present
-                                let normalized = if sub_path.starts_with("value.") {
-                                    sub_path.to_string()
-                                } else {
-                                    format!("value.{}", sub_path)
-                                };
-                                transform_blob_at_path(&mut record_json, &normalized, &did, preset);
-                            }
-                        }
-                    }
+        for (idx, record) in records.iter().enumerate() {
+            for (key, lookup) in &reverse_patterns {
+                let match_value = if lookup.match_field == "$.uri" {
+                    record.get("uri").and_then(|v| v.as_str())
+                } else {
+                    let field_path = lookup.match_field.strip_prefix("$.").unwrap_or("");
+                    get_nested_str(record, field_path)
+                };
 
-                    (target_uri.clone(), record_json)
-                })
-        })
-        .collect();
-
-    // Attach hydrated records to main records
-    for (target_uri, indices) in hydration_lookups {
-        if let Some(hydrated) = hydrated_records.get(&target_uri) {
-            for (idx, key) in indices {
-                if let Some(record) = records.get_mut(idx) {
-                    record[key] = hydrated.clone();
+                if let Some(value) = match_value {
+                    reverse_lookups.push((
+                        idx,
+                        *key,
+                        lookup.collection.clone(),
+                        lookup.field.clone(),
+                        value.to_string(),
+                        lookup.limit.unwrap_or(10),
+                    ));
                 }
+            }
+        }
+
+        // Parallel lookup
+        let results: Vec<(usize, &str, Vec<serde_json::Value>)> = reverse_lookups
+            .par_iter()
+            .filter_map(|(idx, key, collection, field, value, limit)| {
+                store
+                    .get_by_field_value(collection, field, value, *limit, None)
+                    .ok()
+                    .map(|related| {
+                        let related_json: Vec<serde_json::Value> = related
+                            .into_iter()
+                            .map(|r| build_record_json(&r.uri, &r.cid, r.value, r.indexed_at, app))
+                            .collect();
+                        (*idx, *key, related_json)
+                    })
+            })
+            .collect();
+
+        // Merge results back
+        for (idx, key, related_json) in results {
+            if let Some(record) = records.get_mut(idx) {
+                record[key] = serde_json::Value::Array(related_json);
             }
         }
     }
@@ -548,6 +615,122 @@ fn extract_search_fields(fields: &HashMap<String, serde_json::Value>) -> HashMap
         .collect()
 }
 
+/// Reverse lookup configuration parsed from a pattern
+#[derive(Debug, Clone)]
+struct ReverseLookup {
+    collection: String,
+    field: String,
+    match_field: String, // e.g., "$.uri"
+    limit: Option<usize>,
+}
+
+/// Parse a reverse lookup pattern like "at://*/app.bsky.feed.like/*?subject.uri=$.uri&limit=5"
+fn parse_reverse_lookup(pattern: &str) -> Option<ReverseLookup> {
+    // Must have wildcards and query params
+    if !pattern.contains('*') || !pattern.contains('?') {
+        return None;
+    }
+
+    // Parse: at://*/collection/*?field=$.value&limit=N
+    let parts: Vec<&str> = pattern.splitn(2, '?').collect();
+    if parts.len() != 2 {
+        return None;
+    }
+
+    let uri_part = parts[0];
+    let query_part = parts[1];
+
+    // Extract collection from at://*/collection/*
+    let uri_parts: Vec<&str> = uri_part.split('/').collect();
+    if uri_parts.len() < 4 {
+        return None;
+    }
+    let collection = uri_parts[3].trim_end_matches('*').trim_end_matches('/');
+    if collection.is_empty() {
+        return None;
+    }
+
+    // Parse query params
+    let mut field = None;
+    let mut match_field = None;
+    let mut limit = None;
+
+    for param in query_part.split('&') {
+        let kv: Vec<&str> = param.splitn(2, '=').collect();
+        if kv.len() == 2 {
+            if kv[1].starts_with("$.") {
+                field = Some(kv[0].to_string());
+                match_field = Some(kv[1].to_string());
+            } else if kv[0] == "limit" {
+                limit = kv[1].parse().ok();
+            }
+        }
+    }
+
+    Some(ReverseLookup {
+        collection: collection.to_string(),
+        field: field?,
+        match_field: match_field?,
+        limit,
+    })
+}
+
+/// Extract count.* fields from the flattened map
+fn extract_count_fields(fields: &HashMap<String, serde_json::Value>) -> HashMap<String, String> {
+    fields
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix("count.").and_then(|field| {
+                v.as_str()
+                    .map(|pattern| (field.to_string(), pattern.to_string()))
+            })
+        })
+        .collect()
+}
+
+/// Get a nested string value from a JSON object using dot notation
+fn get_nested_str<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a str> {
+    let mut current = value;
+    for part in path.split('.') {
+        current = current.get(part)?;
+    }
+    current.as_str()
+}
+
+/// Execute count.* reverse lookups on records
+fn execute_count_lookups(
+    records: &mut [serde_json::Value],
+    count_fields: &HashMap<String, String>,
+    app: &AppState,
+) {
+    if count_fields.is_empty() {
+        return;
+    }
+
+    for record in records.iter_mut() {
+        for (key, pattern) in count_fields {
+            if let Some(lookup) = parse_reverse_lookup(pattern) {
+                // Substitute $.field with actual value from record
+                let match_value = if lookup.match_field == "$.uri" {
+                    record.get("uri").and_then(|v| v.as_str())
+                } else {
+                    // Handle other $.field patterns like "$.value.subject.uri"
+                    let field_path = lookup.match_field.strip_prefix("$.").unwrap_or("");
+                    get_nested_str(record, field_path)
+                };
+
+                if let Some(value) = match_value {
+                    let count = app
+                        .store
+                        .count_by_field_value(&lookup.collection, &lookup.field, value)
+                        .unwrap_or(0);
+                    record[key] = serde_json::Value::Number(count.into());
+                }
+            }
+        }
+    }
+}
+
 async fn query_handler(
     State((app, _)): State<AppStateHandle>,
     Json(payload): Json<QueryRequest>,
@@ -627,6 +810,18 @@ async fn query_handler(
         }
     }
 
+    // Extract count.* fields for reverse lookups
+    let mut count_fields = extract_count_fields(&payload.search_fields);
+
+    // Merge count fields from URI params
+    for (key, value) in &uri_params {
+        if let Some(field) = key.strip_prefix("count.") {
+            count_fields
+                .entry(field.to_string())
+                .or_insert_with(|| value.clone());
+        }
+    }
+
     // If search fields present, use Tantivy search
     if !search_fields.is_empty() {
         return execute_search_query(
@@ -637,6 +832,7 @@ async fn query_handler(
             sort.as_deref(),
             &hydrate,
             &payload.blobs,
+            &count_fields,
         )
         .await;
     }
@@ -668,6 +864,7 @@ async fn query_handler(
                     &hydrate,
                     &payload.blobs,
                     payload.include_count,
+                    &count_fields,
                 )
                 .await;
             }
@@ -756,6 +953,9 @@ async fn query_handler(
             hydrate_records(&mut values, &hydrate, &payload.blobs, &app);
         }
 
+        // Execute count.* reverse lookups
+        execute_count_lookups(&mut values, &count_fields, &app);
+
         // Get count if requested
         let total = if payload.include_count {
             app.store.count_collection(collection).ok()
@@ -779,6 +979,7 @@ async fn query_handler(
         &hydrate,
         &payload.blobs,
         payload.include_count,
+        &count_fields,
     )
     .await
 }
@@ -791,6 +992,7 @@ async fn execute_unsorted_query(
     hydrate: &HashMap<String, String>,
     blobs: &HashMap<String, String>,
     include_count: bool,
+    count_fields: &HashMap<String, String>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let records = query::execute_paginated(parsed, &app.store, cursor, limit + 1).map_err(|e| {
         (
@@ -819,6 +1021,9 @@ async fn execute_unsorted_query(
     if !hydrate.is_empty() || !blobs.is_empty() {
         hydrate_records(&mut values, hydrate, blobs, app);
     }
+
+    // Execute count.* reverse lookups
+    execute_count_lookups(&mut values, count_fields, app);
 
     // Get count if requested
     let total = if include_count {
@@ -850,6 +1055,7 @@ async fn execute_search_query(
     sort: Option<&str>,
     hydrate: &HashMap<String, String>,
     blobs: &HashMap<String, String>,
+    count_fields: &HashMap<String, String>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let search = app.search.as_ref().ok_or_else(|| {
         (
@@ -1000,6 +1206,9 @@ async fn execute_search_query(
     if !hydrate.is_empty() || !blobs.is_empty() {
         hydrate_records(&mut records, hydrate, blobs, app);
     }
+
+    // Execute count.* reverse lookups
+    execute_count_lookups(&mut records, count_fields, app);
 
     let total = records.len();
 
@@ -1295,8 +1504,6 @@ fn start_firehose(
     sync_handle: Arc<SyncHandle>,
     running: Arc<AtomicBool>,
 ) {
-    running.store(true, Ordering::Relaxed);
-
     std::thread::spawn(move || {
         // Load cursor from previous session (allows 72hr recovery)
         let cursor = app.get_firehose_cursor(&relay);
@@ -1545,13 +1752,17 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
         .install_recorder()
         .expect("failed to install Prometheus recorder");
 
-    let running = Arc::new(AtomicBool::new(false));
+    let running = Arc::new(AtomicBool::new(true));
 
     // Start sync worker
     let sync_handle = Arc::new(start_sync_worker(Arc::clone(&app)));
 
     // Start crawler
-    start_crawler(Arc::clone(&app), Arc::clone(&sync_handle));
+    start_crawler(
+        Arc::clone(&app),
+        Arc::clone(&sync_handle),
+        Arc::clone(&running),
+    );
 
     // Start firehose if relay specified
     if let Some(relay) = relay {
