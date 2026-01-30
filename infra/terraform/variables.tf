@@ -102,3 +102,9 @@ variable "atpdb_search_fields" {
   type        = string
   default     = ""
 }
+
+variable "atpdb_cache_size_mb" {
+  description = "Database cache size in MB (default 1024, recommend 20-25% of RAM)"
+  type        = number
+  default     = 1024
+}

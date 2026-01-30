@@ -25,6 +25,7 @@ resource "hcloud_server" "main" {
     atpdb_collections       = var.atpdb_collections
     atpdb_indexes           = var.atpdb_indexes
     atpdb_search_fields     = var.atpdb_search_fields
+    atpdb_cache_size_mb     = var.atpdb_cache_size_mb
   })
 
   lifecycle {

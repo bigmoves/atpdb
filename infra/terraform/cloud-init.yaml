@@ -69,6 +69,7 @@ write_files:
 %{ if atpdb_search_fields != "" ~}
       Environment=ATPDB_SEARCH_FIELDS=${atpdb_search_fields}
 %{ endif ~}
+      Environment=ATPDB_CACHE_SIZE_MB=${atpdb_cache_size_mb}
       Restart=always
       RestartSec=5
 

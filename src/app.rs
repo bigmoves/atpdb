@@ -32,11 +32,27 @@ pub struct AppState {
 
 const CONFIG_KEY: &[u8] = b"config";
 
+/// Default cache size in bytes (1 GB)
+/// fjall docs recommend 20-25% of available memory, or more if dataset fits in memory
+const DEFAULT_CACHE_SIZE: u64 = 1024 * 1024 * 1024;
+
 impl AppState {
     pub fn open(path: &Path) -> Result<Self, AppError> {
         let start = std::time::Instant::now();
-        let db = Database::builder(path).open()?;
-        tracing::debug!("db open: {:?}", start.elapsed());
+
+        // Configure cache size from env or use default
+        let cache_size = std::env::var("ATPDB_CACHE_SIZE_MB")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+            .map(|mb| mb * 1024 * 1024)
+            .unwrap_or(DEFAULT_CACHE_SIZE);
+
+        let db = Database::builder(path).cache_size(cache_size).open()?;
+        tracing::info!(
+            "db open with {}MB cache: {:?}",
+            cache_size / 1024 / 1024,
+            start.elapsed()
+        );
 
         let records = db.keyspace("records", KeyspaceCreateOptions::default)?;
         let repos_keyspace = db.keyspace("repos", KeyspaceCreateOptions::default)?;

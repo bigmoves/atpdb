@@ -86,6 +86,16 @@ ATPDB_SYNC_PARALLELISM=10 atpdb serve
 
 Higher values sync faster but use more CPU, memory, and bandwidth.
 
+### Cache Size
+
+Control the database block cache size in MB (default: 1024):
+
+```bash
+ATPDB_CACHE_SIZE_MB=2048 atpdb serve
+```
+
+Larger cache improves query performance. Recommended: 20-25% of available RAM, or more if your dataset fits in memory.
+
 ## Query Syntax
 
 Queries use AT-URI patterns:
