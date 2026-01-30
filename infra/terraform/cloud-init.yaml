@@ -1,0 +1,124 @@
+#cloud-config
+
+hostname: ${hostname}
+manage_etc_hosts: true
+
+package_update: true
+package_upgrade: true
+packages:
+  - docker.io
+  - docker-compose-v2
+  - git
+  - curl
+  - htop
+  - ncdu
+  - jq
+  - fail2ban
+  - ufw
+  - unattended-upgrades
+
+users:
+  - name: deploy
+    groups: [docker, sudo]
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys: []
+
+write_files:
+  # Docker daemon config
+  - path: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "100m",
+          "max-file": "3"
+        }
+      }
+
+  # Environment file
+  - path: /opt/atpdb/.env
+    permissions: '0600'
+    content: |
+      DOMAIN=${domain}
+      GRAFANA_PASSWORD=${grafana_password}
+
+  # atpdb systemd service
+  - path: /etc/systemd/system/atpdb.service
+    content: |
+      [Unit]
+      Description=ATPDB AT Protocol Indexer
+      After=network.target
+
+      [Service]
+      Type=simple
+      User=deploy
+      WorkingDirectory=/data/atpdb
+      ExecStart=/usr/local/bin/atpdb serve
+      Environment=ATPDB_MODE=signal
+      Environment=ATPDB_RELAY=wss://relay1.us-east.bsky.network
+      Environment=ATPDB_SIGNAL_COLLECTION=fm.teal.alpha.feed.play
+      Environment=ATPDB_COLLECTIONS=fm.teal.alpha.feed.play,app.bsky.actor.profile
+      Environment=ATPDB_INDEXES=fm.teal.alpha.feed.play:playedTime:datetime
+      Environment=ATPDB_SEARCH_FIELDS=fm.teal.alpha.feed.play:trackName,fm.teal.alpha.feed.play:releaseName,fm.teal.alpha.feed.play:artists.*.artistName
+      Restart=always
+      RestartSec=5
+
+      [Install]
+      WantedBy=multi-user.target
+
+runcmd:
+  # Copy SSH keys from root to deploy user
+  - mkdir -p /home/deploy/.ssh
+  - cp /root/.ssh/authorized_keys /home/deploy/.ssh/authorized_keys
+  - chown -R deploy:deploy /home/deploy/.ssh
+  - chmod 700 /home/deploy/.ssh
+  - chmod 600 /home/deploy/.ssh/authorized_keys
+
+  # Enable Docker
+  - systemctl enable docker
+  - systemctl start docker
+
+  # Configure firewall
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow ssh
+  - ufw allow http
+  - ufw allow https
+  - ufw --force enable
+
+  # Create data directory
+  - mkdir -p /data/atpdb
+  - chown -R deploy:deploy /data
+
+  # Create application directory
+  - mkdir -p /opt/atpdb
+  - chown -R deploy:deploy /opt/atpdb
+
+  # Download latest atpdb release
+  - |
+    LATEST=$(curl -s https://api.github.com/repos/${github_repo}/releases/latest | jq -r .tag_name)
+    curl -L -o /usr/local/bin/atpdb "https://github.com/${github_repo}/releases/download/$LATEST/atpdb-linux-amd64"
+    chmod +x /usr/local/bin/atpdb
+
+  # Clone repo for docker configs
+  - git clone https://github.com/${github_repo}.git /opt/atpdb/repo
+
+  # Start monitoring stack
+  - |
+    cd /opt/atpdb/repo/infra/docker
+    cp /opt/atpdb/.env .env
+    docker compose up -d
+
+  # Enable and start atpdb
+  - systemctl daemon-reload
+  - systemctl enable atpdb
+  - systemctl start atpdb
+
+  # Enable fail2ban
+  - systemctl enable fail2ban
+  - systemctl start fail2ban
+
+  # Enable automatic security updates
+  - systemctl enable unattended-upgrades
+  - systemctl start unattended-upgrades

@@ -1,0 +1,9 @@
+{$DOMAIN} {
+    handle /grafana* {
+        reverse_proxy grafana:3000
+    }
+
+    handle {
+        reverse_proxy host.docker.internal:3000
+    }
+}

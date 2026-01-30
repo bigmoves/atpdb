@@ -1,0 +1,12 @@
+# Copy to terraform.tfvars and fill in values
+
+hcloud_token     = "your-hetzner-api-token"
+ssh_keys         = ["your-ssh-key-name"]
+domain           = "atpdb.example.com"
+grafana_password = "secure-password"
+github_repo      = "bigmoves/atpdb"
+
+# Optional overrides
+# environment = "production"
+# server_type = "cx22"
+# location    = "nbg1"
