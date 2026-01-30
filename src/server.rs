@@ -521,6 +521,7 @@ pub struct ConfigUpdateRequest {
     signal_collection: Option<String>,
     collections: Option<Vec<String>>,
     search_fields: Option<Vec<String>>,
+    sync_parallelism: Option<u32>,
 }
 
 async fn health(State((app, _)): State<AppStateHandle>) -> Result<&'static str, StatusCode> {
@@ -1473,6 +1474,9 @@ async fn config_update(
                 .iter()
                 .filter_map(|s| crate::config::SearchFieldConfig::parse(s))
                 .collect();
+        }
+        if let Some(parallelism) = payload.sync_parallelism {
+            config.sync_parallelism = parallelism;
         }
     })
     .map_err(|e| {

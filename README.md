@@ -76,6 +76,16 @@ Enable fuzzy text search on specific fields:
 ATPDB_SEARCH_FIELDS="fm.teal.alpha.feed.play:track.name" atpdb serve
 ```
 
+### Sync Parallelism
+
+Control how many repos sync concurrently (default: 3):
+
+```bash
+ATPDB_SYNC_PARALLELISM=10 atpdb serve
+```
+
+Higher values sync faster but use more CPU, memory, and bandwidth.
+
 ## Query Syntax
 
 Queries use AT-URI patterns:
