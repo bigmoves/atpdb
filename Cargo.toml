@@ -2,6 +2,8 @@
 name = "atpdb"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+authors = ["Chad Miller"]
 
 [dependencies]
 fjall = "3"
