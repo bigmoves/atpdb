@@ -89,10 +89,7 @@ impl Crawler {
                     "{}/xrpc/com.atproto.sync.listRepos?limit=1000&cursor={}",
                     relay_base, c
                 ),
-                _ => format!(
-                    "{}/xrpc/com.atproto.sync.listRepos?limit=1000",
-                    relay_base
-                ),
+                _ => format!("{}/xrpc/com.atproto.sync.listRepos?limit=1000", relay_base),
             };
 
             println!("Crawling: {}", url);
@@ -192,7 +189,10 @@ impl Crawler {
             }
             Mode::Signal => {
                 if let Some(ref collection) = config.signal_collection {
-                    println!("Crawler: Signal mode, enumerating by collection: {}", collection);
+                    println!(
+                        "Crawler: Signal mode, enumerating by collection: {}",
+                        collection
+                    );
                     self.enumerate_by_collection(collection)
                 } else {
                     println!("Crawler: Signal mode but no signal_collection configured");

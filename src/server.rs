@@ -15,26 +15,24 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use metrics::{counter, gauge, histogram};
-use std::time::Instant;
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use metrics::{counter, gauge, histogram};
+use metrics_exporter_prometheus::PrometheusHandle;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
-use metrics_exporter_prometheus::PrometheusHandle;
 
 type AppStateHandle = (Arc<AppState>, Arc<SyncHandle>);
 
 type MetricsState = (PrometheusHandle, Arc<AppState>);
 
-async fn metrics_handler(
-    State((handle, _app)): State<MetricsState>,
-) -> String {
+async fn metrics_handler(State((handle, _app)): State<MetricsState>) -> String {
     // Gauges are updated by a background task every 30 seconds,
     // not here, to avoid lock contention during Prometheus scrapes.
     handle.render()
@@ -51,7 +49,8 @@ async fn http_metrics_middleware(req: Request, next: Next) -> Response {
     let duration = start.elapsed().as_secs_f64();
 
     counter!("http_requests_total", "method" => method.clone(), "path" => path.clone(), "status" => status).increment(1);
-    histogram!("http_request_duration_seconds", "method" => method, "path" => path).record(duration);
+    histogram!("http_request_duration_seconds", "method" => method, "path" => path)
+        .record(duration);
 
     response
 }
@@ -242,9 +241,8 @@ fn hydrate_records(
     let parsed_patterns: Vec<(&str, &str, String, String)> = hydrate
         .iter()
         .filter_map(|(key, pattern)| {
-            parse_hydration_pattern(pattern).map(|(collection, rkey)| {
-                (key.as_str(), pattern.as_str(), collection, rkey)
-            })
+            parse_hydration_pattern(pattern)
+                .map(|(collection, rkey)| (key.as_str(), pattern.as_str(), collection, rkey))
         })
         .collect();
 
@@ -253,8 +251,7 @@ fn hydrate_records(
     }
 
     // Collect all DIDs and their hydration targets using references
-    let mut hydration_lookups: HashMap<String, Vec<(usize, &str)>> =
-        HashMap::new();
+    let mut hydration_lookups: HashMap<String, Vec<(usize, &str)>> = HashMap::new();
 
     for (idx, record) in records.iter().enumerate() {
         if let Some(uri) = record.get("uri").and_then(|u| u.as_str()) {
@@ -275,33 +272,37 @@ fn hydrate_records(
         .keys()
         .par_bridge()
         .filter_map(|target_uri| {
-            store.get_by_uri_string(target_uri).ok().flatten().map(|record| {
-                let mut record_json = build_record_json(
-                    &record.uri,
-                    &record.cid,
-                    record.value,
-                    record.indexed_at,
-                    app,
-                );
+            store
+                .get_by_uri_string(target_uri)
+                .ok()
+                .flatten()
+                .map(|record| {
+                    let mut record_json = build_record_json(
+                        &record.uri,
+                        &record.cid,
+                        record.value,
+                        record.indexed_at,
+                        app,
+                    );
 
-                // Transform blobs in hydrated record
-                let did = extract_did_from_uri(target_uri).unwrap_or_default();
-                for (path, preset) in blobs {
-                    for (key, _, _, _) in &parsed_patterns {
-                        if let Some(sub_path) = path.strip_prefix(&format!("{}.", key)) {
-                            // Normalize: add value. prefix if not already present
-                            let normalized = if sub_path.starts_with("value.") {
-                                sub_path.to_string()
-                            } else {
-                                format!("value.{}", sub_path)
-                            };
-                            transform_blob_at_path(&mut record_json, &normalized, &did, preset);
+                    // Transform blobs in hydrated record
+                    let did = extract_did_from_uri(target_uri).unwrap_or_default();
+                    for (path, preset) in blobs {
+                        for (key, _, _, _) in &parsed_patterns {
+                            if let Some(sub_path) = path.strip_prefix(&format!("{}.", key)) {
+                                // Normalize: add value. prefix if not already present
+                                let normalized = if sub_path.starts_with("value.") {
+                                    sub_path.to_string()
+                                } else {
+                                    format!("value.{}", sub_path)
+                                };
+                                transform_blob_at_path(&mut record_json, &normalized, &did, preset);
+                            }
                         }
                     }
-                }
 
-                (target_uri.clone(), record_json)
-            })
+                    (target_uri.clone(), record_json)
+                })
         })
         .collect();
 
@@ -455,11 +456,11 @@ pub struct ConfigUpdateRequest {
     search_fields: Option<Vec<String>>,
 }
 
-async fn health(
-    State((app, _)): State<AppStateHandle>,
-) -> Result<&'static str, StatusCode> {
+async fn health(State((app, _)): State<AppStateHandle>) -> Result<&'static str, StatusCode> {
     // Verify database is accessible by doing a simple count
-    app.store.count().map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    app.store
+        .count()
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     Ok("ok")
 }
 
@@ -513,7 +514,10 @@ fn update_app_gauges(app: &AppState) {
 
 async fn stats(State((app, _)): State<AppStateHandle>) -> Result<Json<StatsResponse>, StatusCode> {
     update_app_gauges(&app);
-    let records = app.store.count().map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let records = app
+        .store
+        .count()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let tracked_repos = app.repos.list().map(|r| r.len()).unwrap_or(0);
     let config = app.config();
     let cursors = app
@@ -532,14 +536,14 @@ async fn stats(State((app, _)): State<AppStateHandle>) -> Result<Json<StatsRespo
 }
 
 /// Extract search.* fields from the flattened map
-fn extract_search_fields(
-    fields: &HashMap<String, serde_json::Value>,
-) -> HashMap<String, String> {
+fn extract_search_fields(fields: &HashMap<String, serde_json::Value>) -> HashMap<String, String> {
     fields
         .iter()
         .filter_map(|(k, v)| {
-            k.strip_prefix("search.")
-                .and_then(|field| v.as_str().map(|query| (field.to_string(), query.to_string())))
+            k.strip_prefix("search.").and_then(|field| {
+                v.as_str()
+                    .map(|query| (field.to_string(), query.to_string()))
+            })
         })
         .collect()
 }
@@ -599,7 +603,9 @@ async fn query_handler(
     let mut hydrate = payload.hydrate.clone();
     for (key, value) in &uri_params {
         if let Some(field) = key.strip_prefix("hydrate.") {
-            hydrate.entry(field.to_string()).or_insert_with(|| value.clone());
+            hydrate
+                .entry(field.to_string())
+                .or_insert_with(|| value.clone());
         }
     }
 
@@ -817,8 +823,12 @@ async fn execute_unsorted_query(
     // Get count if requested
     let total = if include_count {
         match parsed {
-            Query::AllCollection { collection } => app.store.count_collection(collection.as_str()).ok(),
-            Query::Collection { collection, .. } => app.store.count_collection(collection.as_str()).ok(),
+            Query::AllCollection { collection } => {
+                app.store.count_collection(collection.as_str()).ok()
+            }
+            Query::Collection { collection, .. } => {
+                app.store.count_collection(collection.as_str()).ok()
+            }
             Query::Exact(_) | Query::AllForDid { .. } => Some(values.len()), // Count is just result count
         }
     } else {
@@ -845,7 +855,8 @@ async fn execute_search_query(
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorResponse {
-                error: "Search is not enabled. Set ATPDB_SEARCH_FIELDS to enable search indexing.".to_string(),
+                error: "Search is not enabled. Set ATPDB_SEARCH_FIELDS to enable search indexing."
+                    .to_string(),
             }),
         )
     })?;
@@ -964,7 +975,9 @@ async fn execute_search_query(
                 "number" => {
                     let num_a = val_a.and_then(|v| v.as_f64());
                     let num_b = val_b.and_then(|v| v.as_f64());
-                    num_a.partial_cmp(&num_b).unwrap_or(std::cmp::Ordering::Equal)
+                    num_a
+                        .partial_cmp(&num_b)
+                        .unwrap_or(std::cmp::Ordering::Equal)
                 }
                 _ => {
                     let str_a = val_a.and_then(|v| v.as_str()).unwrap_or("");
@@ -1011,17 +1024,24 @@ async fn sync_handler(
     let search = app.search.clone();
     let search_fields = config.search_fields.clone();
     let result = tokio::task::spawn_blocking(move || {
-        sync::sync_repo(&payload.did, &store, &collections, &indexes, search.as_ref(), &search_fields)
+        sync::sync_repo(
+            &payload.did,
+            &store,
+            &collections,
+            &indexes,
+            search.as_ref(),
+            &search_fields,
+        )
     })
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: e.to_string(),
-                }),
-            )
-        })?;
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                error: e.to_string(),
+            }),
+        )
+    })?;
 
     match result {
         Ok(sync_result) => {
@@ -1317,16 +1337,15 @@ fn start_firehose(
                                 }
                                 Mode::Signal => {
                                     // Check if this commit contains a signal collection record
-                                    let has_signal = config.signal_collection.as_ref().is_some_and(
-                                        |signal| {
+                                    let has_signal =
+                                        config.signal_collection.as_ref().is_some_and(|signal| {
                                             operations.iter().any(|op| match op {
                                                 Operation::Create { uri, .. } => {
                                                     uri.collection.as_str() == signal
                                                 }
                                                 _ => false,
                                             })
-                                        },
-                                    );
+                                        });
 
                                     if has_signal {
                                         // Auto-add repo if not tracked
@@ -1342,18 +1361,22 @@ fn start_firehose(
                                 }
                                 Mode::FullNetwork => {
                                     // Auto-sync new DIDs when we see them post to configured collections
-                                    let has_matching_collection = operations.iter().any(|op| {
-                                        match op {
-                                            Operation::Create { uri, .. } | Operation::Update { uri, .. } => {
-                                                matches_any_filter(uri.collection.as_str(), &config.collections)
-                                            }
-                                            Operation::Delete { uri } => {
-                                                matches_any_filter(uri.collection.as_str(), &config.collections)
-                                            }
-                                        }
-                                    });
+                                    let has_matching_collection =
+                                        operations.iter().any(|op| match op {
+                                            Operation::Create { uri, .. }
+                                            | Operation::Update { uri, .. } => matches_any_filter(
+                                                uri.collection.as_str(),
+                                                &config.collections,
+                                            ),
+                                            Operation::Delete { uri } => matches_any_filter(
+                                                uri.collection.as_str(),
+                                                &config.collections,
+                                            ),
+                                        });
 
-                                    if has_matching_collection && !app.repos.contains(did.as_str()).unwrap_or(false) {
+                                    if has_matching_collection
+                                        && !app.repos.contains(did.as_str()).unwrap_or(false)
+                                    {
                                         let state = RepoState::new(did.to_string());
                                         let _ = app.repos.put(&state);
                                         let _ = sync_handle.queue_blocking(did.to_string());
@@ -1394,7 +1417,11 @@ fn start_firehose(
                                                 .unwrap()
                                                 .as_secs(),
                                         };
-                                        if let Err(e) = app.store.put_with_indexes(&uri, &record, &config.indexes) {
+                                        if let Err(e) = app.store.put_with_indexes(
+                                            &uri,
+                                            &record,
+                                            &config.indexes,
+                                        ) {
                                             eprintln!("Storage error: {}", e);
                                         }
                                         // Index for search
@@ -1427,7 +1454,11 @@ fn start_firehose(
                                                 .unwrap()
                                                 .as_secs(),
                                         };
-                                        if let Err(e) = app.store.put_with_indexes(&uri, &record, &config.indexes) {
+                                        if let Err(e) = app.store.put_with_indexes(
+                                            &uri,
+                                            &record,
+                                            &config.indexes,
+                                        ) {
                                             eprintln!("Storage error: {}", e);
                                         }
                                         // Index for search
@@ -1449,7 +1480,9 @@ fn start_firehose(
                                         ) {
                                             continue;
                                         }
-                                        if let Err(e) = app.store.delete_with_indexes(&uri, &config.indexes) {
+                                        if let Err(e) =
+                                            app.store.delete_with_indexes(&uri, &config.indexes)
+                                        {
                                             eprintln!("Storage error: {}", e);
                                         }
                                         // Remove from search index
@@ -1505,7 +1538,9 @@ fn start_firehose(
 pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
     // Initialize Prometheus metrics exporter with histogram buckets
     let prometheus_handle = metrics_exporter_prometheus::PrometheusBuilder::new()
-        .set_buckets(&[0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0])
+        .set_buckets(&[
+            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+        ])
         .expect("failed to set histogram buckets")
         .install_recorder()
         .expect("failed to install Prometheus recorder");

@@ -3,8 +3,8 @@ use crate::repos::{RepoError, RepoStore};
 use crate::search::SearchIndex;
 use crate::storage::{StorageError, Store};
 use fjall::{Database, KeyspaceCreateOptions};
-use std::path::Path;
 use parking_lot::RwLock;
+use std::path::Path;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -75,7 +75,8 @@ impl AppState {
 
             if needs_rebuild {
                 // Delete old index entries first (for this direction only)
-                let keys: Vec<_> = store.records_keyspace()
+                let keys: Vec<_> = store
+                    .records_keyspace()
                     .prefix(prefix.as_bytes())
                     .filter_map(|item| item.key().ok().map(|k| k.to_vec()))
                     .collect();
@@ -83,7 +84,10 @@ impl AppState {
                     let _ = store.records_keyspace().remove(&key);
                 }
 
-                println!("Building index {}:{}:{}...", index.collection, index.field, index.direction);
+                println!(
+                    "Building index {}:{}:{}...",
+                    index.collection, index.field, index.direction
+                );
                 match store.rebuild_index(index) {
                     Ok(count) => println!("Built index with {} entries", count),
                     Err(e) => eprintln!("Error building index: {}", e),
@@ -99,7 +103,11 @@ impl AppState {
                 continue;
             }
             let ts_prefix = format!("idx:a:__ts__:{}\0", collection);
-            let has_ts_index = store.records_keyspace().prefix(ts_prefix.as_bytes()).next().is_some();
+            let has_ts_index = store
+                .records_keyspace()
+                .prefix(ts_prefix.as_bytes())
+                .next()
+                .is_some();
 
             if !has_ts_index {
                 println!("Rebuilding __ts__ index for {}...", collection);
@@ -142,9 +150,7 @@ impl AppState {
         self.db.persist(fjall::PersistMode::SyncAll)?;
         if let Some(ref search) = self.search {
             search.commit().map_err(|e| {
-                AppError::Fjall(fjall::Error::Io(std::io::Error::other(
-                    e.to_string(),
-                )))
+                AppError::Fjall(fjall::Error::Io(std::io::Error::other(e.to_string())))
             })?;
         }
         Ok(())
@@ -160,8 +166,7 @@ impl AppState {
     }
 
     pub fn set_config(&self, config: Config) -> Result<(), AppError> {
-        let value =
-            serde_json::to_vec(&config).map_err(ConfigError::Serialization)?;
+        let value = serde_json::to_vec(&config).map_err(ConfigError::Serialization)?;
         self.config_keyspace.insert(CONFIG_KEY, &value)?;
         *self.config.write() = config;
         Ok(())
@@ -191,7 +196,10 @@ impl AppState {
                 let search = search.clone();
                 let store = self.store.clone();
                 std::thread::spawn(move || {
-                    eprintln!("Auto-reindexing {} new search field(s)...", new_fields.len());
+                    eprintln!(
+                        "Auto-reindexing {} new search field(s)...",
+                        new_fields.len()
+                    );
                     match search.reindex_from_store(&store, &new_fields) {
                         Ok(count) => eprintln!("Auto-reindexed {} records", count),
                         Err(e) => eprintln!("Auto-reindex error: {}", e),
@@ -212,7 +220,8 @@ impl AppState {
     }
 
     pub fn set_cursor(&self, key: &str, cursor: &str) -> Result<(), AppError> {
-        self.crawler_cursors.insert(key.as_bytes(), cursor.as_bytes())?;
+        self.crawler_cursors
+            .insert(key.as_bytes(), cursor.as_bytes())?;
         Ok(())
     }
 

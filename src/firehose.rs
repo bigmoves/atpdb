@@ -135,14 +135,23 @@ impl FirehoseClient {
     pub fn connect(relay: &str, cursor: Option<i64>) -> Result<Self, FirehoseError> {
         let base = to_websocket_url(relay);
         let url = match cursor {
-            Some(seq) => format!("{}/xrpc/com.atproto.sync.subscribeRepos?cursor={}", base.trim_end_matches('/'), seq),
-            None => format!("{}/xrpc/com.atproto.sync.subscribeRepos", base.trim_end_matches('/')),
+            Some(seq) => format!(
+                "{}/xrpc/com.atproto.sync.subscribeRepos?cursor={}",
+                base.trim_end_matches('/'),
+                seq
+            ),
+            None => format!(
+                "{}/xrpc/com.atproto.sync.subscribeRepos",
+                base.trim_end_matches('/')
+            ),
         };
         let (socket, _response) = connect(&url).map_err(Box::new)?;
 
         // Set read timeout so we can check shutdown flag periodically
         if let tungstenite::stream::MaybeTlsStream::NativeTls(ref stream) = socket.get_ref() {
-            let _ = stream.get_ref().set_read_timeout(Some(Duration::from_secs(1)));
+            let _ = stream
+                .get_ref()
+                .set_read_timeout(Some(Duration::from_secs(1)));
         } else if let tungstenite::stream::MaybeTlsStream::Plain(ref stream) = socket.get_ref() {
             let _ = stream.set_read_timeout(Some(Duration::from_secs(1)));
         }
@@ -158,7 +167,10 @@ impl FirehoseClient {
                 }
                 Ok(Message::Close(_)) => return Ok(None),
                 Ok(_) => continue,
-                Err(tungstenite::Error::Io(ref e)) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                Err(tungstenite::Error::Io(ref e))
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
                     // Timeout - return None to let caller check shutdown flag
                     return Ok(None);
                 }
@@ -179,7 +191,10 @@ impl FirehoseClient {
             Some("#identity") => {
                 let body: IdentityBody = ciborium::from_reader(&mut cursor)
                     .map_err(|e| FirehoseError::Cbor(e.to_string()))?;
-                let did: Did = body.did.parse().map_err(|_| FirehoseError::InvalidMessage)?;
+                let did: Did = body
+                    .did
+                    .parse()
+                    .map_err(|_| FirehoseError::InvalidMessage)?;
                 return Ok(Some(Event::Identity {
                     seq: body.seq,
                     did,

@@ -73,11 +73,7 @@ fn fetch_handle_from_plc(did: &str) -> Result<Option<String>, String> {
     Ok(None)
 }
 
-fn handle_command(
-    line: &str,
-    app: &Arc<AppState>,
-    running: &Arc<AtomicBool>,
-) -> CommandResult {
+fn handle_command(line: &str, app: &Arc<AppState>, running: &Arc<AtomicBool>) -> CommandResult {
     match line {
         ".quit" | ".exit" => CommandResult::Exit,
 
@@ -119,7 +115,9 @@ fn handle_command(
             println!("  .reindex search           Reindex all records for search");
             println!();
             println!("Handles:");
-            println!("  .handles sync             Fetch handles for all known DIDs from PLC directory");
+            println!(
+                "  .handles sync             Fetch handles for all known DIDs from PLC directory"
+            );
             println!("  .handles get <did>        Get stored handle for a DID");
             println!("  .handles fetch <did>      Fetch and store handle from PLC directory");
             println!();
@@ -159,7 +157,11 @@ fn handle_command(
                     } else {
                         println!("Crawler cursors:");
                         for (key, value) in cursors {
-                            let display = if value.is_empty() { "(complete)" } else { &value };
+                            let display = if value.is_empty() {
+                                "(complete)"
+                            } else {
+                                &value
+                            };
                             println!("  {}: {}", key, display);
                         }
                     }
@@ -222,7 +224,11 @@ fn handle_command(
                 }
                 Some("count") => {
                     let prefix = parts.get(1).copied().unwrap_or("");
-                    let count = app.store.records_keyspace().prefix(prefix.as_bytes()).count();
+                    let count = app
+                        .store
+                        .records_keyspace()
+                        .prefix(prefix.as_bytes())
+                        .count();
                     println!("Keys with prefix '{}': {}", prefix, count);
                 }
                 Some("get") => {
@@ -230,10 +236,15 @@ fn handle_command(
                         match app.store.records_keyspace().get(key.as_bytes()) {
                             Ok(Some(val)) => {
                                 // Try to parse as JSON
-                                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&val) {
+                                if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&val)
+                                {
                                     println!("{}", serde_json::to_string_pretty(&json).unwrap());
                                 } else {
-                                    println!("Raw ({} bytes): {:?}", val.len(), String::from_utf8_lossy(&val));
+                                    println!(
+                                        "Raw ({} bytes): {:?}",
+                                        val.len(),
+                                        String::from_utf8_lossy(&val)
+                                    );
                                 }
                             }
                             Ok(None) => println!("Key not found"),
@@ -245,7 +256,9 @@ fn handle_command(
                 }
                 _ => {
                     println!("Debug commands:");
-                    println!("  .debug keys [prefix] [limit]  List keys by prefix (default limit 20)");
+                    println!(
+                        "  .debug keys [prefix] [limit]  List keys by prefix (default limit 20)"
+                    );
                     println!("  .debug count [prefix]         Count keys by prefix");
                     println!("  .debug get <key>              Get value for exact key");
                     println!();
@@ -361,7 +374,8 @@ fn handle_command(
                     if let Err(e) = app.update_config(|c| c.indexes = indexes.clone()) {
                         println!("Error: {}", e);
                     } else {
-                        let idx_strs: Vec<_> = indexes.iter().map(|i| i.to_config_string()).collect();
+                        let idx_strs: Vec<_> =
+                            indexes.iter().map(|i| i.to_config_string()).collect();
                         println!("Indexes set to: {}", idx_strs.join(", "));
                     }
                 }
@@ -401,7 +415,9 @@ fn handle_command(
                                     println!("Note: Run .reindex search to index existing records");
                                 }
                             } else {
-                                println!("Invalid format. Use: .config search add collection:field");
+                                println!(
+                                    "Invalid format. Use: .config search add collection:field"
+                                );
                             }
                         }
                         "remove" => {
@@ -419,7 +435,9 @@ fn handle_command(
                                     println!("Removed search field: {}", spec);
                                 }
                             } else {
-                                println!("Invalid format. Use: .config search remove collection:field");
+                                println!(
+                                    "Invalid format. Use: .config search remove collection:field"
+                                );
                             }
                         }
                         _ => {
@@ -526,7 +544,9 @@ fn handle_command(
                     let mut errors = 0;
 
                     // Get all DIDs from repos
-                    let dids: Vec<String> = app.repos.list()
+                    let dids: Vec<String> = app
+                        .repos
+                        .list()
                         .unwrap_or_default()
                         .iter()
                         .map(|r| r.did.clone())
@@ -605,26 +625,22 @@ fn handle_command(
                         println!("Usage: .count rebuild <collection>");
                     }
                 }
-                Some("rebuild-all") => {
-                    match app.store.unique_collections() {
-                        Ok(collections) => {
-                            for collection in collections {
-                                print!("Rebuilding count for {}... ", collection);
-                                match app.store.rebuild_count(&collection) {
-                                    Ok(count) => println!("{}", count),
-                                    Err(e) => println!("Error: {}", e),
-                                }
+                Some("rebuild-all") => match app.store.unique_collections() {
+                    Ok(collections) => {
+                        for collection in collections {
+                            print!("Rebuilding count for {}... ", collection);
+                            match app.store.rebuild_count(&collection) {
+                                Ok(count) => println!("{}", count),
+                                Err(e) => println!("Error: {}", e),
                             }
                         }
-                        Err(e) => println!("Error: {}", e),
                     }
-                }
-                Some(collection) => {
-                    match app.store.count_collection(collection) {
-                        Ok(count) => println!("{}: {}", collection, count),
-                        Err(e) => println!("Error: {}", e),
-                    }
-                }
+                    Err(e) => println!("Error: {}", e),
+                },
+                Some(collection) => match app.store.count_collection(collection) {
+                    Ok(count) => println!("{}: {}", collection, count),
+                    Err(e) => println!("Error: {}", e),
+                },
                 None => {
                     println!("Usage:");
                     println!("  .count <collection>       Show collection count");
@@ -785,7 +801,14 @@ fn handle_command(
                 let start = std::time::Instant::now();
                 let store = Arc::new(app.store.clone());
                 let config = app.config();
-                match sync::sync_repo(did, &store, &config.collections, &config.indexes, app.search.as_ref(), &config.search_fields) {
+                match sync::sync_repo(
+                    did,
+                    &store,
+                    &config.collections,
+                    &config.indexes,
+                    app.search.as_ref(),
+                    &config.search_fields,
+                ) {
                     Ok(result) => {
                         let elapsed = start.elapsed();
                         // Store handle if resolved
@@ -848,9 +871,7 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                 while running.load(Ordering::Relaxed) {
                     match client.next_event() {
                         Ok(Some(Event::Commit {
-                            seq,
-                            operations,
-                            ..
+                            seq, operations, ..
                         })) => {
                             last_seq = seq;
                             event_count += 1;
@@ -859,7 +880,8 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                             }
                             for op in operations {
                                 match op {
-                                    Operation::Create { uri, cid, value } | Operation::Update { uri, cid, value } => {
+                                    Operation::Create { uri, cid, value }
+                                    | Operation::Update { uri, cid, value } => {
                                         let config = app.config();
                                         let record = storage::Record {
                                             uri: uri.to_string(),
@@ -870,7 +892,11 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                                                 .unwrap()
                                                 .as_secs(),
                                         };
-                                        if let Err(e) = app.store.put_with_indexes(&uri, &record, &config.indexes) {
+                                        if let Err(e) = app.store.put_with_indexes(
+                                            &uri,
+                                            &record,
+                                            &config.indexes,
+                                        ) {
                                             eprintln!("Storage error: {}", e);
                                         }
                                         // Index for search
@@ -887,7 +913,9 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                                     }
                                     Operation::Delete { uri } => {
                                         let config = app.config();
-                                        if let Err(e) = app.store.delete_with_indexes(&uri, &config.indexes) {
+                                        if let Err(e) =
+                                            app.store.delete_with_indexes(&uri, &config.indexes)
+                                        {
                                             eprintln!("Storage error: {}", e);
                                         }
                                         // Remove from search index

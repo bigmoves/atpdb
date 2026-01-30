@@ -107,7 +107,6 @@ pub struct AtUri {
     pub rkey: Rkey,
 }
 
-
 impl FromStr for AtUri {
     type Err = ParseError;
 
@@ -201,5 +200,4 @@ mod tests {
         let uri: AtUri = original.parse().unwrap();
         assert_eq!(uri.to_string(), original);
     }
-
 }

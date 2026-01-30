@@ -109,7 +109,8 @@ impl RepoStore {
         if let Some(old_state) = self.get(&state.did)? {
             if old_state.status != state.status {
                 // Remove old status index entry
-                self.repos.remove(Self::status_key(old_state.status, &state.did))?;
+                self.repos
+                    .remove(Self::status_key(old_state.status, &state.did))?;
             }
         }
 
@@ -118,7 +119,8 @@ impl RepoStore {
         self.repos.insert(Self::repo_key(&state.did), &value)?;
 
         // Add status index entry (value is empty, just need the key for lookup)
-        self.repos.insert(Self::status_key(state.status, &state.did), b"")?;
+        self.repos
+            .insert(Self::status_key(state.status, &state.did), b"")?;
 
         Ok(())
     }
@@ -160,7 +162,8 @@ impl RepoStore {
             // Extract DID from key: "s:{status}:{did}"
             let key = item.key()?;
             let key_str = String::from_utf8_lossy(&key);
-            if let Some(did) = key_str.strip_prefix(&format!("{}{}:", Self::STATUS_PREFIX, status)) {
+            if let Some(did) = key_str.strip_prefix(&format!("{}{}:", Self::STATUS_PREFIX, status))
+            {
                 if let Some(state) = self.get(did)? {
                     results.push(state);
                 }

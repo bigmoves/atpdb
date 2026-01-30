@@ -1,11 +1,13 @@
+use metrics::{counter, histogram};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
-use metrics::{counter, histogram};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, Query, TermQuery};
-use tantivy::schema::{IndexRecordOption, Schema, STORED, TEXT, Field, Value, TextFieldIndexing, TextOptions};
-use tantivy::tokenizer::{NgramTokenizer, TextAnalyzer, LowerCaser};
+use tantivy::schema::{
+    Field, IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, STORED, TEXT,
+};
+use tantivy::tokenizer::{LowerCaser, NgramTokenizer, TextAnalyzer};
 use tantivy::{Index, IndexWriter, ReloadPolicy, TantivyDocument, Term};
 use thiserror::Error;
 
@@ -56,12 +58,12 @@ impl SearchIndex {
         };
 
         // Register the n-gram tokenizer for fuzzy matching
-        let ngram_tokenizer = TextAnalyzer::builder(
-            NgramTokenizer::all_ngrams(3, 3).unwrap()
-        )
-        .filter(LowerCaser)
-        .build();
-        index.tokenizers().register(NGRAM_TOKENIZER, ngram_tokenizer);
+        let ngram_tokenizer = TextAnalyzer::builder(NgramTokenizer::all_ngrams(3, 3).unwrap())
+            .filter(LowerCaser)
+            .build();
+        index
+            .tokenizers()
+            .register(NGRAM_TOKENIZER, ngram_tokenizer);
 
         let writer = index.writer(50_000_000)?; // 50MB heap
 
@@ -93,8 +95,7 @@ impl SearchIndex {
         let content_indexing = TextFieldIndexing::default()
             .set_tokenizer(NGRAM_TOKENIZER)
             .set_index_option(tantivy::schema::IndexRecordOption::WithFreqsAndPositions);
-        let content_options = TextOptions::default()
-            .set_indexing_options(content_indexing);
+        let content_options = TextOptions::default().set_indexing_options(content_indexing);
         schema_builder.add_text_field("content", content_options);
         // Which field this content came from (for field-specific search)
         schema_builder.add_text_field("field_name", TEXT | STORED);
@@ -123,7 +124,8 @@ impl SearchIndex {
         for sf in fields_for_collection {
             if let Some(text) = extract_text_field(value, &sf.field) {
                 // Normalize: lowercase and strip non-alphanumeric for consistent trigram matching
-                let normalized: String = text.to_lowercase()
+                let normalized: String = text
+                    .to_lowercase()
                     .chars()
                     .filter(|c| c.is_alphanumeric())
                     .collect();
@@ -209,7 +211,8 @@ impl SearchIndex {
         _fuzzy_distance: u8, // Kept for API compatibility, trigrams handle fuzziness
     ) -> Result<Vec<String>, SearchError> {
         let start = Instant::now();
-        let reader = self.index
+        let reader = self
+            .index
             .reader_builder()
             .reload_policy(ReloadPolicy::OnCommitWithDelay)
             .try_into()?;
@@ -224,7 +227,8 @@ impl SearchIndex {
         // Generate trigrams from text (only for strings with 3+ chars)
         // Strips spaces/punctuation for normalized matching ("oh sees" = "ohsees")
         fn trigrams(s: &str) -> Vec<String> {
-            let normalized: String = s.to_lowercase()
+            let normalized: String = s
+                .to_lowercase()
                 .chars()
                 .filter(|c| c.is_alphanumeric())
                 .collect();
@@ -233,7 +237,8 @@ impl SearchIndex {
                 // Too short for trigrams - skip
                 return vec![];
             }
-            chars.windows(3)
+            chars
+                .windows(3)
                 .map(|w| w.iter().collect::<String>())
                 .collect()
         }
@@ -242,14 +247,20 @@ impl SearchIndex {
         let collection_queries: Vec<(Occur, Box<dyn Query>)> = tokenize(collection)
             .map(|token| {
                 let term = Term::from_field_text(self.collection_field, &token.to_lowercase());
-                (Occur::Must, Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>)
+                (
+                    Occur::Must,
+                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>,
+                )
             })
             .collect();
 
         let field_queries: Vec<(Occur, Box<dyn Query>)> = tokenize(field)
             .map(|token| {
                 let term = Term::from_field_text(self.field_name_field, &token.to_lowercase());
-                (Occur::Must, Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>)
+                (
+                    Occur::Must,
+                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>,
+                )
             })
             .collect();
 
@@ -282,7 +293,8 @@ impl SearchIndex {
 
             for (i, tg) in all_trigrams.iter().enumerate() {
                 let term = Term::from_field_text(self.content_field, tg);
-                let query = Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>;
+                let query =
+                    Box::new(TermQuery::new(term, IndexRecordOption::Basic)) as Box<dyn Query>;
 
                 if i < min_required {
                     clauses.push((Occur::Must, query));
@@ -352,12 +364,9 @@ impl SearchIndex {
             eprintln!("  found {} records to index", records.len());
 
             for record in records {
-                if let Err(e) = self.index_record(
-                    &record.uri,
-                    collection,
-                    &record.value,
-                    search_fields,
-                ) {
+                if let Err(e) =
+                    self.index_record(&record.uri, collection, &record.value, search_fields)
+                {
                     eprintln!("Error indexing {}: {}", record.uri, e);
                     errors += 1;
                     continue;
@@ -421,7 +430,9 @@ fn extract_text_recursive(value: &serde_json::Value, parts: &[&str]) -> Option<S
     }
 
     // Standard object field access
-    value.get(part).and_then(|v| extract_text_recursive(v, rest))
+    value
+        .get(part)
+        .and_then(|v| extract_text_recursive(v, rest))
 }
 
 #[cfg(test)]
@@ -449,15 +460,30 @@ mod tests {
             ]
         });
 
-        assert_eq!(extract_text_field(&value, "text"), Some("hello world".to_string()));
-        assert_eq!(extract_text_field(&value, "nested.field"), Some("nested value".to_string()));
+        assert_eq!(
+            extract_text_field(&value, "text"),
+            Some("hello world".to_string())
+        );
+        assert_eq!(
+            extract_text_field(&value, "nested.field"),
+            Some("nested value".to_string())
+        );
         assert_eq!(extract_text_field(&value, "missing"), None);
 
         // Array index access
-        assert_eq!(extract_text_field(&value, "artists.0.artistName"), Some("Good Kid".to_string()));
-        assert_eq!(extract_text_field(&value, "artists.1.artistName"), Some("Bad Kid".to_string()));
+        assert_eq!(
+            extract_text_field(&value, "artists.0.artistName"),
+            Some("Good Kid".to_string())
+        );
+        assert_eq!(
+            extract_text_field(&value, "artists.1.artistName"),
+            Some("Bad Kid".to_string())
+        );
 
         // Wildcard array access - joins all values
-        assert_eq!(extract_text_field(&value, "artists.*.artistName"), Some("Good Kid Bad Kid".to_string()));
+        assert_eq!(
+            extract_text_field(&value, "artists.*.artistName"),
+            Some("Good Kid Bad Kid".to_string())
+        );
     }
 }

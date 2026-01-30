@@ -115,10 +115,7 @@ pub fn sync_repo(
     tracing::debug!("PDS: {}, handle: {:?}", resolved.pds, resolved.handle);
 
     tracing::debug!("fetching repo...");
-    let url = format!(
-        "{}/xrpc/com.atproto.sync.getRepo?did={}",
-        resolved.pds, did
-    );
+    let url = format!("{}/xrpc/com.atproto.sync.getRepo?did={}", resolved.pds, did);
     let response = http_client().get(&url).send()?;
 
     if !response.status().is_success() {
@@ -129,8 +126,15 @@ pub fn sync_repo(
     tracing::debug!("downloaded {} bytes", car_bytes.len());
 
     let rt = tokio::runtime::Runtime::new().unwrap();
-    let mut result =
-        rt.block_on(process_car(&car_bytes, did, store, collections, indexes, search, search_fields))?;
+    let mut result = rt.block_on(process_car(
+        &car_bytes,
+        did,
+        store,
+        collections,
+        indexes,
+        search,
+        search_fields,
+    ))?;
 
     histogram!("sync_duration_seconds").record(start.elapsed().as_secs_f64());
     histogram!("sync_repo_size_bytes").record(car_bytes.len() as f64);
@@ -205,7 +209,12 @@ async fn process_car(
                                     if store.put_with_indexes(&uri, &record, &indexes).is_ok() {
                                         // Index for search
                                         if let Some(search) = search {
-                                            let _ = search.index_record(&record.uri, collection, &record.value, &search_fields);
+                                            let _ = search.index_record(
+                                                &record.uri,
+                                                collection,
+                                                &record.value,
+                                                &search_fields,
+                                            );
                                         }
                                         count += 1;
                                     }

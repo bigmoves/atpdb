@@ -124,11 +124,21 @@ impl Store {
     }
 
     fn index_prefix_asc(collection: &str, field: &str) -> Vec<u8> {
-        format!("idx:a:{}:{}\0", Self::sanitize_key_value(collection), Self::sanitize_key_value(field)).into_bytes()
+        format!(
+            "idx:a:{}:{}\0",
+            Self::sanitize_key_value(collection),
+            Self::sanitize_key_value(field)
+        )
+        .into_bytes()
     }
 
     fn index_prefix_desc(collection: &str, field: &str) -> Vec<u8> {
-        format!("idx:d:{}:{}\0", Self::sanitize_key_value(collection), Self::sanitize_key_value(field)).into_bytes()
+        format!(
+            "idx:d:{}:{}\0",
+            Self::sanitize_key_value(collection),
+            Self::sanitize_key_value(field)
+        )
+        .into_bytes()
     }
 
     /// Build indexedAt keys (both directions)
@@ -284,7 +294,8 @@ impl Store {
             }
             None => Ok(None),
         };
-        histogram!("storage_operation_seconds", "op" => "get").record(start.elapsed().as_secs_f64());
+        histogram!("storage_operation_seconds", "op" => "get")
+            .record(start.elapsed().as_secs_f64());
         result
     }
 
@@ -337,7 +348,8 @@ impl Store {
             self.increment_count(uri.collection.as_str())?;
         }
 
-        histogram!("storage_operation_seconds", "op" => "put").record(start.elapsed().as_secs_f64());
+        histogram!("storage_operation_seconds", "op" => "put")
+            .record(start.elapsed().as_secs_f64());
         Ok(())
     }
 
@@ -377,7 +389,8 @@ impl Store {
             self.decrement_count(uri.collection.as_str())?;
         }
 
-        histogram!("storage_operation_seconds", "op" => "delete").record(start.elapsed().as_secs_f64());
+        histogram!("storage_operation_seconds", "op" => "delete")
+            .record(start.elapsed().as_secs_f64());
         Ok(())
     }
 

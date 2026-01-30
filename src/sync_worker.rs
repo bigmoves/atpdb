@@ -92,9 +92,16 @@ async fn sync_one_repo(app: &AppState, did: &str) {
     let search_fields = config.search_fields.clone();
 
     let result = tokio::task::spawn_blocking(move || {
-        sync_repo(&did_owned, &store, &collections, &indexes, search.as_ref(), &search_fields)
+        sync_repo(
+            &did_owned,
+            &store,
+            &collections,
+            &indexes,
+            search.as_ref(),
+            &search_fields,
+        )
     })
-        .await;
+    .await;
 
     // Update state based on result
     if let Ok(Some(mut state)) = app.repos.get(did) {

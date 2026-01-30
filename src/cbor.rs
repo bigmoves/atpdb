@@ -2,8 +2,7 @@ use libipld::Cid;
 
 /// Convert DAG-CBOR bytes to JSON, handling CID links as {"$link": "..."}
 pub fn dagcbor_to_json(data: &[u8]) -> Result<serde_json::Value, String> {
-    let cbor_value: ciborium::Value =
-        ciborium::from_reader(data).map_err(|e| e.to_string())?;
+    let cbor_value: ciborium::Value = ciborium::from_reader(data).map_err(|e| e.to_string())?;
     cbor_to_json(cbor_value)
 }
 
@@ -19,11 +18,9 @@ fn cbor_to_json(value: ciborium::Value) -> Result<serde_json::Value, String> {
                 Ok(serde_json::Value::String(n.to_string()))
             }
         }
-        ciborium::Value::Float(f) => {
-            serde_json::Number::from_f64(f)
-                .map(serde_json::Value::Number)
-                .ok_or_else(|| "invalid float".to_string())
-        }
+        ciborium::Value::Float(f) => serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .ok_or_else(|| "invalid float".to_string()),
         ciborium::Value::Bytes(b) => {
             // Encode bytes as base64 with $bytes marker
             use base64::Engine;

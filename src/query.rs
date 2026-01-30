@@ -51,9 +51,7 @@ impl Query {
                 // at://did/* - all collections for DID
                 if collection_str == "*" {
                     if did_str == "*" {
-                        return Err(QueryError::Invalid(
-                            "at://*/* is not supported".to_string(),
-                        ));
+                        return Err(QueryError::Invalid("at://*/* is not supported".to_string()));
                     }
                     let did: Did = did_str.parse()?;
                     return Ok(Query::AllForDid { did });
