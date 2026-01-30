@@ -36,9 +36,10 @@ write_files:
         }
       }
 
-  # Environment file
+  # Environment file for docker compose
   - path: /opt/atpdb/.env
-    permissions: '0600'
+    permissions: '0644'
+    owner: deploy:deploy
     content: |
       DOMAIN=${domain}
       GRAFANA_PASSWORD=${grafana_password}
@@ -67,6 +68,20 @@ write_files:
       [Install]
       WantedBy=multi-user.target
 
+  # Deploy script for updates
+  - path: /usr/local/bin/atpdb-update
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -e
+      echo "Downloading latest atpdb..."
+      curl -L -o /usr/local/bin/atpdb "https://github.com/${github_repo}/releases/download/latest/atpdb-linux-amd64"
+      chmod +x /usr/local/bin/atpdb
+      echo "Restarting atpdb..."
+      systemctl restart atpdb
+      echo "Done. Status:"
+      systemctl status atpdb --no-pager
+
 runcmd:
   # Copy SSH keys from root to deploy user
   - mkdir -p /home/deploy/.ssh
@@ -78,6 +93,13 @@ runcmd:
   # Enable Docker
   - systemctl enable docker
   - systemctl start docker
+
+  # Wait for docker to be ready
+  - |
+    for i in $(seq 1 30); do
+      docker info >/dev/null 2>&1 && break
+      sleep 2
+    done
 
   # Configure firewall
   - ufw default deny incoming
@@ -113,17 +135,23 @@ runcmd:
 
   # Download latest atpdb release
   - |
-    curl -L -o /usr/local/bin/atpdb "https://github.com/${github_repo}/releases/download/latest/atpdb-linux-amd64"
+    echo "Downloading atpdb binary..."
+    curl -fL -o /usr/local/bin/atpdb "https://github.com/${github_repo}/releases/download/latest/atpdb-linux-amd64"
     chmod +x /usr/local/bin/atpdb
+    echo "Binary downloaded: $(ls -la /usr/local/bin/atpdb)"
 
-  # Clone repo for docker configs
-  - git clone https://github.com/${github_repo}.git /opt/atpdb/repo
+  # Clone repo for docker configs (as deploy user)
+  - sudo -u deploy git clone https://github.com/${github_repo}.git /opt/atpdb/repo
+
+  # Copy env and set permissions
+  - cp /opt/atpdb/.env /opt/atpdb/repo/infra/docker/.env
+  - chown deploy:deploy /opt/atpdb/repo/infra/docker/.env
 
   # Start monitoring stack
   - |
     cd /opt/atpdb/repo/infra/docker
-    cp /opt/atpdb/.env .env
-    docker compose up -d
+    sudo -u deploy docker compose up -d
+    echo "Docker stack started"
 
   # Enable and start atpdb
   - systemctl daemon-reload
