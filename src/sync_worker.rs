@@ -1,14 +1,19 @@
 use crate::app::AppState;
 use crate::repos::RepoStatus;
-use crate::sync::sync_repo;
+use crate::resync_buffer::BufferedOperation;
+use crate::storage::Record;
+use crate::sync::{cleanup_pds_backoff, sync_repo, SyncError};
+use crate::types::AtUri;
 use metrics::{counter, gauge};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const RETRY_BASE_SECS: u64 = 60;
 const RETRY_MAX_SECS: u64 = 3600;
+/// Short retry delay for rate-limited repos (15 seconds)
+const RATE_LIMIT_RETRY_SECS: u64 = 15;
 
 pub struct SyncWorker {
     app: Arc<AppState>,
@@ -35,15 +40,19 @@ pub fn start_sync_worker(app: Arc<AppState>) -> SyncHandle {
     let config = app.config();
     let (queue_tx, queue_rx) = mpsc::channel(1000);
 
+    let handle = SyncHandle {
+        queue_tx: queue_tx.clone(),
+    };
+
     let worker = SyncWorker {
         app: Arc::clone(&app),
         queue_rx,
         parallelism: config.sync_parallelism,
     };
 
-    tokio::spawn(worker.run());
-
-    let handle = SyncHandle { queue_tx };
+    // Pass handle clone to worker for retry_loop
+    let retry_handle = handle.clone();
+    tokio::spawn(worker.run(retry_handle));
 
     // Re-queue any repos that were pending or syncing from a previous run
     let resume_handle = handle.clone();
@@ -81,11 +90,11 @@ async fn resume_incomplete_syncs(app: &AppState, handle: &SyncHandle) {
 }
 
 impl SyncWorker {
-    async fn run(mut self) {
-        // Spawn retry checker
+    async fn run(mut self, retry_handle: SyncHandle) {
+        // Spawn retry checker with handle for re-queuing
         let app_clone = Arc::clone(&self.app);
         tokio::spawn(async move {
-            retry_loop(app_clone).await;
+            retry_loop(app_clone, retry_handle).await;
         });
 
         // Process queue
@@ -162,6 +171,17 @@ async fn sync_one_repo(app: &AppState, did: &str) {
                 if let Some(handle) = sync_result.handle {
                     let _ = app.set_handle(did, &handle);
                 }
+
+                // Drain and process any buffered firehose commits
+                drain_resync_buffer(app, did);
+            }
+            Ok(Err(SyncError::RateLimited)) => {
+                // Rate limited - retry soon without counting as an error
+                counter!("sync_completed_total", "status" => "rate_limited").increment(1);
+                debug!(did, "Repo sync rate limited, will retry shortly");
+                state.status = RepoStatus::Pending;
+                state.next_retry = Some(now_secs() + RATE_LIMIT_RETRY_SECS);
+                // Don't increment retry_count - this isn't a real error
             }
             Ok(Err(e)) => {
                 counter!("sync_completed_total", "status" => "error").increment(1);
@@ -184,20 +204,60 @@ async fn sync_one_repo(app: &AppState, did: &str) {
     }
 }
 
-async fn retry_loop(app: Arc<AppState>) {
+async fn retry_loop(app: Arc<AppState>, handle: SyncHandle) {
+    let mut tick_count: u32 = 0;
+
     loop {
-        tokio::time::sleep(Duration::from_secs(30)).await;
+        // 5 second interval for quick rate-limit recovery
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        tick_count = tick_count.wrapping_add(1);
+
+        // Clean up PDS backoff map every ~60 seconds (12 ticks)
+        if tick_count % 12 == 0 {
+            cleanup_pds_backoff();
+        }
 
         let now = now_secs();
+
+        // Check Error repos ready for retry
         if let Ok(errored) = app.repos.list_by_status(RepoStatus::Error) {
             for repo in errored {
                 if let Some(next_retry) = repo.next_retry {
                     if next_retry <= now {
-                        // Reset to pending for retry
+                        // Reset to pending and re-queue
                         let mut state = repo.clone();
                         state.status = RepoStatus::Pending;
+                        state.next_retry = None;
                         if let Err(e) = app.repos.put(&state) {
                             warn!(did = repo.did, error = %e, "Failed to reset repo for retry");
+                            continue;
+                        }
+                        if let Err(e) = handle.queue(repo.did.clone()).await {
+                            warn!(did = repo.did, error = %e, "Failed to re-queue repo for retry");
+                        } else {
+                            debug!(did = repo.did, "Re-queued error repo for retry");
+                        }
+                    }
+                }
+            }
+        }
+
+        // Check Pending repos with next_retry set (rate-limited repos)
+        if let Ok(pending) = app.repos.list_by_status(RepoStatus::Pending) {
+            for repo in pending {
+                if let Some(next_retry) = repo.next_retry {
+                    if next_retry <= now {
+                        // Clear next_retry and re-queue
+                        let mut state = repo.clone();
+                        state.next_retry = None;
+                        if let Err(e) = app.repos.put(&state) {
+                            warn!(did = repo.did, error = %e, "Failed to update repo state");
+                            continue;
+                        }
+                        if let Err(e) = handle.queue(repo.did.clone()).await {
+                            warn!(did = repo.did, error = %e, "Failed to re-queue rate-limited repo");
+                        } else {
+                            debug!(did = repo.did, "Re-queued rate-limited repo");
                         }
                     }
                 }
@@ -217,4 +277,81 @@ fn now_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs()
+}
+
+/// Drain and process any buffered firehose commits for a DID
+fn drain_resync_buffer(app: &AppState, did: &str) {
+    let commits = match app.resync_buffer.drain(did) {
+        Ok(c) => c,
+        Err(e) => {
+            warn!(did, error = %e, "Failed to drain resync buffer");
+            return;
+        }
+    };
+
+    if commits.is_empty() {
+        return;
+    }
+
+    let config = app.config();
+    let mut replayed = 0;
+
+    for commit in commits {
+        for op in commit.operations {
+            match op {
+                BufferedOperation::Create { uri, cid, value }
+                | BufferedOperation::Update { uri, cid, value } => {
+                    let Ok(parsed_uri) = uri.parse::<AtUri>() else {
+                        continue;
+                    };
+
+                    let record = Record {
+                        uri: uri.clone(),
+                        cid,
+                        value: value.clone(),
+                        indexed_at: now_secs(),
+                    };
+
+                    if let Err(e) = app.store.put_with_indexes(&parsed_uri, &record, &config.indexes)
+                    {
+                        warn!(uri, error = %e, "Failed to replay buffered record");
+                        continue;
+                    }
+
+                    // Index for search
+                    if let Some(ref search) = app.search {
+                        let _ = search.index_record(
+                            &uri,
+                            parsed_uri.collection.as_str(),
+                            &value,
+                            &config.search_fields,
+                        );
+                    }
+
+                    replayed += 1;
+                }
+                BufferedOperation::Delete { uri } => {
+                    let Ok(parsed_uri) = uri.parse::<AtUri>() else {
+                        continue;
+                    };
+
+                    if let Err(e) = app.store.delete_with_indexes(&parsed_uri, &config.indexes) {
+                        warn!(uri, error = %e, "Failed to replay buffered delete");
+                        continue;
+                    }
+
+                    // Remove from search index
+                    if let Some(ref search) = app.search {
+                        let _ = search.delete_record(&uri);
+                    }
+
+                    replayed += 1;
+                }
+            }
+        }
+    }
+
+    if replayed > 0 {
+        info!(did, replayed, "Replayed buffered firehose commits");
+    }
 }

@@ -13,6 +13,7 @@ mod firehose;
 mod indexer;
 mod query;
 mod repos;
+mod resync_buffer;
 mod search;
 mod server;
 mod storage;
@@ -24,7 +25,8 @@ use app::AppState;
 use config::Mode;
 use firehose::{Event, FirehoseClient, Operation};
 use query::Query;
-use repos::RepoState;
+use repos::{RepoState, RepoStatus};
+use resync_buffer::{BufferedCommit, BufferedOperation};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
 use std::path::Path;
@@ -939,13 +941,65 @@ fn start_streaming(relay: String, app: Arc<AppState>, running: Arc<AtomicBool>) 
                 while running.load(Ordering::Relaxed) {
                     match client.next_event() {
                         Ok(Some(Event::Commit {
-                            seq, operations, ..
+                            seq,
+                            did,
+                            rev,
+                            operations,
                         })) => {
                             last_seq = seq;
                             event_count += 1;
                             if event_count.is_multiple_of(1000) {
                                 let _ = app.set_firehose_cursor(&relay, seq);
                             }
+
+                            // Check if repo is currently syncing - if so, buffer the commit
+                            let is_syncing = app
+                                .repos
+                                .get(did.as_str())
+                                .ok()
+                                .flatten()
+                                .map(|r| r.status == RepoStatus::Syncing)
+                                .unwrap_or(false);
+
+                            if is_syncing {
+                                // Buffer this commit to replay after sync completes
+                                let buffered_ops: Vec<BufferedOperation> = operations
+                                    .into_iter()
+                                    .map(|op| match op {
+                                        Operation::Create { uri, cid, value } => {
+                                            BufferedOperation::Create {
+                                                uri: uri.to_string(),
+                                                cid,
+                                                value,
+                                            }
+                                        }
+                                        Operation::Update { uri, cid, value } => {
+                                            BufferedOperation::Update {
+                                                uri: uri.to_string(),
+                                                cid,
+                                                value,
+                                            }
+                                        }
+                                        Operation::Delete { uri } => BufferedOperation::Delete {
+                                            uri: uri.to_string(),
+                                        },
+                                    })
+                                    .collect();
+
+                                let commit = BufferedCommit {
+                                    seq,
+                                    did: did.to_string(),
+                                    rev,
+                                    operations: buffered_ops,
+                                };
+
+                                if let Err(e) = app.resync_buffer.add(&commit) {
+                                    eprintln!("Failed to buffer commit: {}", e);
+                                }
+                                continue;
+                            }
+
+                            // Process normally
                             for op in operations {
                                 match op {
                                     Operation::Create { uri, cid, value }

@@ -1,5 +1,6 @@
 use crate::config::{Config, ConfigError, IndexDirection, IndexFieldType};
 use crate::repos::{RepoError, RepoStore};
+use crate::resync_buffer::ResyncBuffer;
 use crate::search::SearchIndex;
 use crate::storage::{StorageError, Store};
 use fjall::{Database, KeyspaceCreateOptions};
@@ -23,6 +24,7 @@ pub struct AppState {
     db: Database,
     pub store: Store,
     pub repos: RepoStore,
+    pub resync_buffer: ResyncBuffer,
     pub search: Option<SearchIndex>,
     config: RwLock<Config>,
     config_keyspace: fjall::Keyspace,
@@ -59,6 +61,8 @@ impl AppState {
         let config_keyspace = db.keyspace("config", KeyspaceCreateOptions::default)?;
         let crawler_cursors = db.keyspace("crawler_cursors", KeyspaceCreateOptions::default)?;
         let handles = db.keyspace("handles", KeyspaceCreateOptions::default)?;
+        let resync_buffer_keyspace =
+            db.keyspace("resync_buffer", KeyspaceCreateOptions::default)?;
 
         // Load config or use default, then apply env overrides
         let mut config: Config = match config_keyspace.get(CONFIG_KEY)? {
@@ -168,6 +172,7 @@ impl AppState {
             db,
             store,
             repos: RepoStore::from_keyspace(repos_keyspace),
+            resync_buffer: ResyncBuffer::from_keyspace(resync_buffer_keyspace),
             search,
             config: RwLock::new(config),
             config_keyspace,

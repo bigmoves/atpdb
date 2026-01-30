@@ -157,7 +157,7 @@ impl Default for Config {
             signal_collection: None,
             collections: Vec::new(),
             relay: "bsky.network".to_string(),
-            sync_parallelism: 3,
+            sync_parallelism: 5,
             indexes: Vec::new(),
             search_fields: Vec::new(),
         }
