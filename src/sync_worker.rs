@@ -5,6 +5,7 @@ use metrics::{counter, gauge};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
+use tracing::{info, warn};
 
 const RETRY_BASE_SECS: u64 = 60;
 const RETRY_MAX_SECS: u64 = 3600;
@@ -35,14 +36,48 @@ pub fn start_sync_worker(app: Arc<AppState>) -> SyncHandle {
     let (queue_tx, queue_rx) = mpsc::channel(1000);
 
     let worker = SyncWorker {
-        app,
+        app: Arc::clone(&app),
         queue_rx,
         parallelism: config.sync_parallelism,
     };
 
     tokio::spawn(worker.run());
 
-    SyncHandle { queue_tx }
+    let handle = SyncHandle { queue_tx };
+
+    // Re-queue any repos that were pending or syncing from a previous run
+    let resume_handle = handle.clone();
+    tokio::spawn(async move {
+        resume_incomplete_syncs(&app, &resume_handle).await;
+    });
+
+    handle
+}
+
+async fn resume_incomplete_syncs(app: &AppState, handle: &SyncHandle) {
+    let mut count = 0;
+
+    // Resume repos stuck in "syncing" (were in-progress when we crashed)
+    if let Ok(syncing) = app.repos.list_by_status(RepoStatus::Syncing) {
+        for repo in syncing {
+            if handle.queue(repo.did.clone()).await.is_ok() {
+                count += 1;
+            }
+        }
+    }
+
+    // Resume repos in "pending" (were queued but not started)
+    if let Ok(pending) = app.repos.list_by_status(RepoStatus::Pending) {
+        for repo in pending {
+            if handle.queue(repo.did.clone()).await.is_ok() {
+                count += 1;
+            }
+        }
+    }
+
+    if count > 0 {
+        info!(count, "Resumed incomplete syncs from previous run");
+    }
 }
 
 impl SyncWorker {
@@ -77,7 +112,7 @@ async fn sync_one_repo(app: &AppState, did: &str) {
         state.status = RepoStatus::Syncing;
         state.error = None;
         if let Err(e) = app.repos.put(&state) {
-            eprintln!("Failed to update repo status for {}: {}", did, e);
+            warn!(did, error = %e, "Failed to update repo status");
         }
     }
 
@@ -137,7 +172,7 @@ async fn sync_one_repo(app: &AppState, did: &str) {
             }
         }
         if let Err(e) = app.repos.put(&state) {
-            eprintln!("Failed to update repo state for {}: {}", did, e);
+            warn!(did, error = %e, "Failed to update repo state");
         }
     }
 }
@@ -155,7 +190,7 @@ async fn retry_loop(app: Arc<AppState>) {
                         let mut state = repo.clone();
                         state.status = RepoStatus::Pending;
                         if let Err(e) = app.repos.put(&state) {
-                            eprintln!("Failed to reset repo {} for retry: {}", repo.did, e);
+                            warn!(did = repo.did, error = %e, "Failed to reset repo for retry");
                         }
                     }
                 }
