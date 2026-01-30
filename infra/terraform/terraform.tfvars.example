@@ -1,10 +1,13 @@
 # Copy to terraform.tfvars and fill in values
 
-hcloud_token     = "your-hetzner-api-token"
-ssh_keys         = ["your-ssh-key-name"]
-domain           = "atpdb.example.com"
-grafana_password = "secure-password"
-github_repo      = "bigmoves/atpdb"
+hcloud_token         = "your-hetzner-api-token"
+ssh_keys             = ["your-ssh-key-name"]
+domain               = "atpdb.example.com"
+grafana_password     = "secure-password"
+github_repo          = "bigmoves/atpdb"
+cloudflare_api_token = "your-cloudflare-api-token"
+cloudflare_zone_id   = "your-zone-id"
+subdomain            = "atpdb"
 
 # Optional overrides
 # environment = "production"

@@ -43,3 +43,20 @@ variable "github_repo" {
   type        = string
   default     = "bigmoves/atpdb"
 }
+
+variable "cloudflare_api_token" {
+  description = "Cloudflare API token with DNS edit permissions"
+  type        = string
+  sensitive   = true
+}
+
+variable "cloudflare_zone_id" {
+  description = "Cloudflare Zone ID for the domain"
+  type        = string
+}
+
+variable "subdomain" {
+  description = "Subdomain for the DNS record (e.g., 'atpdb' for atpdb.example.com)"
+  type        = string
+  default     = "atpdb"
+}
