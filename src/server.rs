@@ -426,6 +426,16 @@ pub struct StatsResponse {
     mode: String,
     cursors: Vec<CursorInfo>,
     collections: std::collections::HashMap<String, usize>,
+    key_counts: KeyCounts,
+    disk_bytes: u64,
+}
+
+#[derive(Serialize)]
+pub struct KeyCounts {
+    records: usize,      // at://*
+    indexes: usize,      // idx:*
+    reverse: usize,      // rev:*
+    counts: usize,       // __count__:* and __revcount__:*
 }
 
 #[derive(Serialize)]
@@ -582,7 +592,7 @@ fn update_app_gauges(app: &AppState) {
 
 async fn stats(State((app, _)): State<AppStateHandle>) -> Result<Json<StatsResponse>, StatusCode> {
     update_app_gauges(&app);
-    let records = app
+    let total_keys = app
         .store
         .count()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -607,12 +617,30 @@ async fn stats(State((app, _)): State<AppStateHandle>) -> Result<Json<StatsRespo
         }
     }
 
+    // Count keys by prefix type
+    let record_count = app.store.count_by_prefix("at://").unwrap_or(0);
+    let index_count = app.store.count_by_prefix("idx:").unwrap_or(0);
+    let reverse_count = app.store.count_by_prefix("rev:").unwrap_or(0);
+    let counts_count = app.store.count_by_prefix("__count__:").unwrap_or(0)
+        + app.store.count_by_prefix("__revcount__:").unwrap_or(0);
+
+    let key_counts = KeyCounts {
+        records: record_count,
+        indexes: index_count,
+        reverse: reverse_count,
+        counts: counts_count,
+    };
+
+    let disk_bytes = app.disk_space().unwrap_or(0);
+
     Ok(Json(StatsResponse {
-        records,
+        records: total_keys,
         tracked_repos,
         mode: config.mode.to_string(),
         cursors,
         collections,
+        key_counts,
+        disk_bytes,
     }))
 }
 

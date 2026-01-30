@@ -733,6 +733,11 @@ impl Store {
         Ok(self.records.len()?)
     }
 
+    /// Count keys by prefix
+    pub fn count_by_prefix(&self, prefix: &str) -> Result<usize, StorageError> {
+        Ok(self.records.prefix(prefix.as_bytes()).count())
+    }
+
     /// Key for collection counters
     fn count_key(collection: &str) -> Vec<u8> {
         format!("__count__:{}", collection).into_bytes()
