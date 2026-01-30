@@ -213,7 +213,7 @@ async fn retry_loop(app: Arc<AppState>, handle: SyncHandle) {
         tick_count = tick_count.wrapping_add(1);
 
         // Clean up PDS backoff map every ~60 seconds (12 ticks)
-        if tick_count % 12 == 0 {
+        if tick_count.is_multiple_of(12) {
             cleanup_pds_backoff();
         }
 
