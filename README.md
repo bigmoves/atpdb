@@ -89,16 +89,22 @@ Queries use AT-URI patterns:
 | `limit` | Max records to return (default 100, max 1000) |
 | `cursor` | Pagination cursor from previous response |
 | `sort` | Field to sort by (requires index) |
-| `search` | Fuzzy text search (requires search field config) |
+| `search.<field>` | Fuzzy text search on field (requires search field config) |
+| `hydrate.<key>` | Attach related record at `<key>` using pattern `at://$.did/collection/rkey` |
+| `blobs.<path>` | Transform blob ref to CDN URL (presets: `avatar`, `banner`, `feed_thumbnail`) |
 
 ```bash
 # Paginated, sorted by playedAt
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
   -d '{"q": "at://*/fm.teal.alpha.feed.play", "sort": "playedAt", "limit": 50}'
 
-# Search for tracks
+# Search for tracks by name (field must be configured in ATPDB_SEARCH_FIELDS)
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
-  -d '{"q": "at://*/fm.teal.alpha.feed.play", "search": "midnight"}'
+  -d '{"q": "at://*/fm.teal.alpha.feed.play", "search.track.name": "midnight"}'
+
+# Hydrate with user's profile and transform avatar blob
+curl -X POST localhost:3000/query -H "Content-Type: application/json" \
+  -d '{"q": "at://*/fm.teal.alpha.feed.play", "hydrate.author": "at://$.did/app.bsky.actor.profile/self", "blobs.author.avatar": "avatar"}'
 ```
 
 ## HTTP API
@@ -131,3 +137,9 @@ atp> .help
 ## Monitoring
 
 See [monitoring/README.md](monitoring/README.md) for Prometheus + Grafana setup.
+
+## Roadmap
+
+- [ ] OAuth authentication
+- [ ] Mutations (create/update/delete records)
+- [ ] Moderation support
