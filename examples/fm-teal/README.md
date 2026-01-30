@@ -1,6 +1,6 @@
 # fm.teal Example
 
-A demo feed UI for [fm.teal](https://fm.teal.fm) music plays, powered by atpdb.
+A demo feed UI for [teal.fm](https://teal.fm) music plays, powered by atpdb.
 
 ## Running atpdb
 

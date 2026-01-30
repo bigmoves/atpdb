@@ -2,28 +2,32 @@
 
 A single executable AT Protocol indexer with backfill, search, and query support.
 
+> **Warning:** API is still evolving and may change without notice.
+
 ## Quick Start
 
+Index [teal.fm](https://teal.fm) music plays:
+
 ```bash
-cargo install --path .
-atpdb serve
+ATPDB_MODE=signal \
+ATPDB_SIGNAL_COLLECTION=fm.teal.alpha.feed.play \
+ATPDB_COLLECTIONS=fm.teal.alpha.feed.play,app.bsky.actor.profile \
+cargo run -- serve
 ```
 
 Server runs at `http://localhost:3000`. Query records:
 
 ```bash
-# All records in a collection
+# All plays
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
-  -d '{"q": "at://*/app.bsky.feed.post"}'
+  -d '{"q": "at://*/fm.teal.alpha.feed.play"}'
 
-# Single user's records
+# Single user's plays
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
-  -d '{"q": "at://did:plc:xyz/app.bsky.feed.post"}'
-
-# Exact record
-curl -X POST localhost:3000/query -H "Content-Type: application/json" \
-  -d '{"q": "at://did:plc:xyz/app.bsky.feed.post/abc123"}'
+  -d '{"q": "at://did:plc:xyz/fm.teal.alpha.feed.play"}'
 ```
+
+See [examples/fm-teal](examples/fm-teal) for a full demo UI.
 
 ## Configuration
 
