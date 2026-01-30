@@ -23,8 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tower_http::compression::CompressionLayer;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -1541,240 +1540,267 @@ fn start_firehose(
     running: Arc<AtomicBool>,
 ) {
     std::thread::spawn(move || {
-        // Load cursor from previous session (allows 72hr recovery)
-        let cursor = app.get_firehose_cursor(&relay);
-        if let Some(seq) = cursor {
-            println!("Resuming firehose from cursor: {}", seq);
-        }
+        let mut reconnect_delay = Duration::from_secs(1);
+        let max_delay = Duration::from_secs(60);
 
-        match FirehoseClient::connect(&relay, cursor) {
-            Ok(mut client) => {
-                gauge!("firehose_connected").set(1.0);
-                println!("Connected to firehose: {}", relay);
-                let mut event_count: u64 = 0;
-                let mut last_seq: i64 = cursor.unwrap_or(0);
+        while running.load(Ordering::Relaxed) {
+            // Load cursor from previous session (allows 72hr recovery)
+            let cursor = app.get_firehose_cursor(&relay);
+            if let Some(seq) = cursor {
+                println!("Resuming firehose from cursor: {}", seq);
+            }
 
-                while running.load(Ordering::Relaxed) {
-                    match client.next_event() {
-                        Ok(Some(Event::Commit {
-                            seq,
-                            did,
-                            rev,
-                            operations,
-                        })) => {
-                            last_seq = seq;
-                            event_count += 1;
-                            gauge!("firehose_last_seq").set(seq as f64);
+            match FirehoseClient::connect(&relay, cursor) {
+                Ok(mut client) => {
+                    gauge!("firehose_connected").set(1.0);
+                    println!("Connected to firehose: {}", relay);
+                    let mut event_count: u64 = 0;
+                    let mut last_seq: i64 = cursor.unwrap_or(0);
 
-                            // Save cursor every 1000 events
-                            if event_count.is_multiple_of(1000) {
-                                let _ = app.set_firehose_cursor(&relay, seq);
-                            }
-                            let config = app.config();
+                    while running.load(Ordering::Relaxed) {
+                        match client.next_event() {
+                            Ok(Some(Event::Commit {
+                                seq,
+                                did,
+                                rev,
+                                operations,
+                            })) => {
+                                last_seq = seq;
+                                event_count += 1;
+                                gauge!("firehose_last_seq").set(seq as f64);
 
-                            // Check if we should process this repo based on mode
-                            let should_process = match config.mode {
-                                Mode::Manual => {
-                                    // Only process tracked repos
-                                    app.repos.contains(did.as_str()).unwrap_or(false)
+                                // Save cursor every 1000 events
+                                if event_count.is_multiple_of(1000) {
+                                    let _ = app.set_firehose_cursor(&relay, seq);
                                 }
-                                Mode::Signal => {
-                                    // Check if this commit contains a signal collection record
-                                    let has_signal =
-                                        config.signal_collection.as_ref().is_some_and(|signal| {
-                                            operations.iter().any(|op| match op {
-                                                Operation::Create { uri, .. } => {
-                                                    uri.collection.as_str() == signal
-                                                }
-                                                _ => false,
-                                            })
-                                        });
+                                let config = app.config();
 
-                                    if has_signal {
-                                        // Auto-add repo if not tracked
-                                        if !app.repos.contains(did.as_str()).unwrap_or(false) {
+                                // Check if we should process this repo based on mode
+                                let should_process = match config.mode {
+                                    Mode::Manual => {
+                                        // Only process tracked repos
+                                        app.repos.contains(did.as_str()).unwrap_or(false)
+                                    }
+                                    Mode::Signal => {
+                                        // Check if this commit contains a signal collection record
+                                        let has_signal = config
+                                            .signal_collection
+                                            .as_ref()
+                                            .is_some_and(|signal| {
+                                                operations.iter().any(|op| match op {
+                                                    Operation::Create { uri, .. } => {
+                                                        uri.collection.as_str() == signal
+                                                    }
+                                                    _ => false,
+                                                })
+                                            });
+
+                                        if has_signal {
+                                            // Auto-add repo if not tracked
+                                            if !app.repos.contains(did.as_str()).unwrap_or(false) {
+                                                let state = RepoState::new(did.to_string());
+                                                let _ = app.repos.put(&state);
+                                                let _ = sync_handle.queue_blocking(did.to_string());
+                                            }
+                                        }
+
+                                        // Process if tracked
+                                        app.repos.contains(did.as_str()).unwrap_or(false)
+                                    }
+                                    Mode::FullNetwork => {
+                                        // Auto-sync new DIDs when we see them post to configured collections
+                                        let has_matching_collection =
+                                            operations.iter().any(|op| match op {
+                                                Operation::Create { uri, .. }
+                                                | Operation::Update { uri, .. } => {
+                                                    matches_any_filter(
+                                                        uri.collection.as_str(),
+                                                        &config.collections,
+                                                    )
+                                                }
+                                                Operation::Delete { uri } => matches_any_filter(
+                                                    uri.collection.as_str(),
+                                                    &config.collections,
+                                                ),
+                                            });
+
+                                        if has_matching_collection
+                                            && !app.repos.contains(did.as_str()).unwrap_or(false)
+                                        {
                                             let state = RepoState::new(did.to_string());
                                             let _ = app.repos.put(&state);
                                             let _ = sync_handle.queue_blocking(did.to_string());
+                                            eprintln!("Auto-syncing new DID: {}", did);
+                                        }
+
+                                        true
+                                    }
+                                };
+
+                                if !should_process {
+                                    continue;
+                                }
+
+                                // Update repo rev if tracked
+                                if let Ok(Some(mut state)) = app.repos.get(did.as_str()) {
+                                    state.rev = Some(rev.clone());
+                                    let _ = app.repos.put(&state);
+                                }
+
+                                for op in operations {
+                                    match op {
+                                        Operation::Create { uri, cid, value } => {
+                                            // Apply collection filter
+                                            if !matches_any_filter(
+                                                uri.collection.as_str(),
+                                                &config.collections,
+                                            ) {
+                                                continue;
+                                            }
+
+                                            let record = Record {
+                                                uri: uri.to_string(),
+                                                cid,
+                                                value,
+                                                indexed_at: SystemTime::now()
+                                                    .duration_since(UNIX_EPOCH)
+                                                    .unwrap()
+                                                    .as_secs(),
+                                            };
+                                            if let Err(e) = app.store.put_with_indexes(
+                                                &uri,
+                                                &record,
+                                                &config.indexes,
+                                            ) {
+                                                eprintln!("Storage error: {}", e);
+                                            }
+                                            // Index for search
+                                            if let Some(ref search) = app.search {
+                                                if let Err(e) = search.index_record(
+                                                    &uri.to_string(),
+                                                    uri.collection.as_str(),
+                                                    &record.value,
+                                                    &config.search_fields,
+                                                ) {
+                                                    eprintln!("Search index error: {}", e);
+                                                }
+                                            }
+                                        }
+                                        Operation::Update { uri, cid, value } => {
+                                            // Apply collection filter
+                                            if !matches_any_filter(
+                                                uri.collection.as_str(),
+                                                &config.collections,
+                                            ) {
+                                                continue;
+                                            }
+
+                                            let record = Record {
+                                                uri: uri.to_string(),
+                                                cid,
+                                                value,
+                                                indexed_at: SystemTime::now()
+                                                    .duration_since(UNIX_EPOCH)
+                                                    .unwrap()
+                                                    .as_secs(),
+                                            };
+                                            if let Err(e) = app.store.put_with_indexes(
+                                                &uri,
+                                                &record,
+                                                &config.indexes,
+                                            ) {
+                                                eprintln!("Storage error: {}", e);
+                                            }
+                                            // Index for search
+                                            if let Some(ref search) = app.search {
+                                                if let Err(e) = search.index_record(
+                                                    &uri.to_string(),
+                                                    uri.collection.as_str(),
+                                                    &record.value,
+                                                    &config.search_fields,
+                                                ) {
+                                                    eprintln!("Search index error: {}", e);
+                                                }
+                                            }
+                                        }
+                                        Operation::Delete { uri } => {
+                                            if !matches_any_filter(
+                                                uri.collection.as_str(),
+                                                &config.collections,
+                                            ) {
+                                                continue;
+                                            }
+                                            if let Err(e) =
+                                                app.store.delete_with_indexes(&uri, &config.indexes)
+                                            {
+                                                eprintln!("Storage error: {}", e);
+                                            }
+                                            // Remove from search index
+                                            if let Some(ref search) = app.search {
+                                                if let Err(e) =
+                                                    search.delete_record(&uri.to_string())
+                                                {
+                                                    eprintln!("Search delete error: {}", e);
+                                                }
+                                            }
                                         }
                                     }
-
-                                    // Process if tracked
-                                    app.repos.contains(did.as_str()).unwrap_or(false)
                                 }
-                                Mode::FullNetwork => {
-                                    // Auto-sync new DIDs when we see them post to configured collections
-                                    let has_matching_collection =
-                                        operations.iter().any(|op| match op {
-                                            Operation::Create { uri, .. }
-                                            | Operation::Update { uri, .. } => matches_any_filter(
-                                                uri.collection.as_str(),
-                                                &config.collections,
-                                            ),
-                                            Operation::Delete { uri } => matches_any_filter(
-                                                uri.collection.as_str(),
-                                                &config.collections,
-                                            ),
-                                        });
-
-                                    if has_matching_collection
-                                        && !app.repos.contains(did.as_str()).unwrap_or(false)
-                                    {
-                                        let state = RepoState::new(did.to_string());
-                                        let _ = app.repos.put(&state);
-                                        let _ = sync_handle.queue_blocking(did.to_string());
-                                        eprintln!("Auto-syncing new DID: {}", did);
+                            }
+                            Ok(Some(Event::Identity { seq, did, handle })) => {
+                                last_seq = seq;
+                                if let Some(h) = handle {
+                                    if let Err(e) = app.set_handle(did.as_str(), &h) {
+                                        eprintln!("Handle update error: {}", e);
                                     }
-
-                                    true
                                 }
-                            };
-
-                            if !should_process {
+                            }
+                            Ok(Some(Event::Unknown { seq })) => {
+                                if let Some(s) = seq {
+                                    last_seq = s;
+                                }
+                            }
+                            Ok(None) => {
+                                // Timeout or connection closed - continue to check running flag
                                 continue;
                             }
-
-                            // Update repo rev if tracked
-                            if let Ok(Some(mut state)) = app.repos.get(did.as_str()) {
-                                state.rev = Some(rev.clone());
-                                let _ = app.repos.put(&state);
-                            }
-
-                            for op in operations {
-                                match op {
-                                    Operation::Create { uri, cid, value } => {
-                                        // Apply collection filter
-                                        if !matches_any_filter(
-                                            uri.collection.as_str(),
-                                            &config.collections,
-                                        ) {
-                                            continue;
-                                        }
-
-                                        let record = Record {
-                                            uri: uri.to_string(),
-                                            cid,
-                                            value,
-                                            indexed_at: SystemTime::now()
-                                                .duration_since(UNIX_EPOCH)
-                                                .unwrap()
-                                                .as_secs(),
-                                        };
-                                        if let Err(e) = app.store.put_with_indexes(
-                                            &uri,
-                                            &record,
-                                            &config.indexes,
-                                        ) {
-                                            eprintln!("Storage error: {}", e);
-                                        }
-                                        // Index for search
-                                        if let Some(ref search) = app.search {
-                                            if let Err(e) = search.index_record(
-                                                &uri.to_string(),
-                                                uri.collection.as_str(),
-                                                &record.value,
-                                                &config.search_fields,
-                                            ) {
-                                                eprintln!("Search index error: {}", e);
-                                            }
-                                        }
-                                    }
-                                    Operation::Update { uri, cid, value } => {
-                                        // Apply collection filter
-                                        if !matches_any_filter(
-                                            uri.collection.as_str(),
-                                            &config.collections,
-                                        ) {
-                                            continue;
-                                        }
-
-                                        let record = Record {
-                                            uri: uri.to_string(),
-                                            cid,
-                                            value,
-                                            indexed_at: SystemTime::now()
-                                                .duration_since(UNIX_EPOCH)
-                                                .unwrap()
-                                                .as_secs(),
-                                        };
-                                        if let Err(e) = app.store.put_with_indexes(
-                                            &uri,
-                                            &record,
-                                            &config.indexes,
-                                        ) {
-                                            eprintln!("Storage error: {}", e);
-                                        }
-                                        // Index for search
-                                        if let Some(ref search) = app.search {
-                                            if let Err(e) = search.index_record(
-                                                &uri.to_string(),
-                                                uri.collection.as_str(),
-                                                &record.value,
-                                                &config.search_fields,
-                                            ) {
-                                                eprintln!("Search index error: {}", e);
-                                            }
-                                        }
-                                    }
-                                    Operation::Delete { uri } => {
-                                        if !matches_any_filter(
-                                            uri.collection.as_str(),
-                                            &config.collections,
-                                        ) {
-                                            continue;
-                                        }
-                                        if let Err(e) =
-                                            app.store.delete_with_indexes(&uri, &config.indexes)
-                                        {
-                                            eprintln!("Storage error: {}", e);
-                                        }
-                                        // Remove from search index
-                                        if let Some(ref search) = app.search {
-                                            if let Err(e) = search.delete_record(&uri.to_string()) {
-                                                eprintln!("Search delete error: {}", e);
-                                            }
-                                        }
-                                    }
+                            Err(e) => {
+                                gauge!("firehose_connected").set(0.0);
+                                counter!("firehose_errors_total", "error" => "connection")
+                                    .increment(1);
+                                eprintln!("Firehose error: {}", e);
+                                // Save cursor before reconnecting
+                                if last_seq > 0 {
+                                    let _ = app.set_firehose_cursor(&relay, last_seq);
                                 }
+                                break; // Break inner loop to reconnect
                             }
                         }
-                        Ok(Some(Event::Identity { seq, did, handle })) => {
-                            last_seq = seq;
-                            if let Some(h) = handle {
-                                if let Err(e) = app.set_handle(did.as_str(), &h) {
-                                    eprintln!("Handle update error: {}", e);
-                                }
-                            }
-                        }
-                        Ok(Some(Event::Unknown { seq })) => {
-                            if let Some(s) = seq {
-                                last_seq = s;
-                            }
-                        }
-                        Ok(None) => {
-                            // Timeout or connection closed - continue to check running flag
-                            continue;
-                        }
-                        Err(e) => {
-                            gauge!("firehose_connected").set(0.0);
-                            counter!("firehose_errors_total", "error" => "connection").increment(1);
-                            eprintln!("Firehose error: {}", e);
-                            break;
-                        }
+
+                        // Reset reconnect delay on successful message processing
+                        reconnect_delay = Duration::from_secs(1);
+                    }
+
+                    // Save final cursor on disconnect
+                    if last_seq > 0 {
+                        let _ = app.set_firehose_cursor(&relay, last_seq);
+                        println!("Saved firehose cursor: {}", last_seq);
                     }
                 }
-
-                // Save final cursor on exit
-                if last_seq > 0 {
-                    let _ = app.set_firehose_cursor(&relay, last_seq);
-                    println!("Saved firehose cursor: {}", last_seq);
+                Err(e) => {
+                    gauge!("firehose_connected").set(0.0);
+                    counter!("firehose_errors_total", "error" => "connect").increment(1);
+                    eprintln!("Failed to connect to firehose: {}", e);
                 }
             }
-            Err(e) => {
-                eprintln!("Failed to connect to firehose: {}", e);
+
+            // Reconnect with exponential backoff
+            if running.load(Ordering::Relaxed) {
+                eprintln!("Reconnecting to firehose in {:?}...", reconnect_delay);
+                std::thread::sleep(reconnect_delay);
+                reconnect_delay = std::cmp::min(reconnect_delay * 2, max_delay);
             }
         }
-        running.store(false, Ordering::Relaxed);
     });
 }
 
