@@ -312,7 +312,9 @@ fn drain_resync_buffer(app: &AppState, did: &str) {
                         indexed_at: now_secs(),
                     };
 
-                    if let Err(e) = app.store.put_with_indexes(&parsed_uri, &record, &config.indexes)
+                    if let Err(e) =
+                        app.store
+                            .put_with_indexes(&parsed_uri, &record, &config.indexes)
                     {
                         warn!(uri, error = %e, "Failed to replay buffered record");
                         continue;
