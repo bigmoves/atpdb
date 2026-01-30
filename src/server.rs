@@ -698,7 +698,7 @@ fn get_nested_str<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a st
     current.as_str()
 }
 
-/// Execute count.* reverse lookups on records
+/// Execute count.* reverse lookups on records (parallel)
 fn execute_count_lookups(
     records: &mut [serde_json::Value],
     count_fields: &HashMap<String, String>,
@@ -708,26 +708,56 @@ fn execute_count_lookups(
         return;
     }
 
-    for record in records.iter_mut() {
-        for (key, pattern) in count_fields {
-            if let Some(lookup) = parse_reverse_lookup(pattern) {
-                // Substitute $.field with actual value from record
-                let match_value = if lookup.match_field == "$.uri" {
-                    record.get("uri").and_then(|v| v.as_str())
-                } else {
-                    // Handle other $.field patterns like "$.value.subject.uri"
-                    let field_path = lookup.match_field.strip_prefix("$.").unwrap_or("");
-                    get_nested_str(record, field_path)
-                };
+    // Parse patterns once
+    let parsed_patterns: Vec<(&str, ReverseLookup)> = count_fields
+        .iter()
+        .filter_map(|(key, pattern)| parse_reverse_lookup(pattern).map(|l| (key.as_str(), l)))
+        .collect();
 
-                if let Some(value) = match_value {
-                    let count = app
-                        .store
-                        .count_by_field_value(&lookup.collection, &lookup.field, value)
-                        .unwrap_or(0);
-                    record[key] = serde_json::Value::Number(count.into());
-                }
+    if parsed_patterns.is_empty() {
+        return;
+    }
+
+    // Collect all count lookups: (record_index, key, collection, field, match_value)
+    let mut lookups: Vec<(usize, &str, &str, &str, String)> = Vec::new();
+
+    for (idx, record) in records.iter().enumerate() {
+        for (key, lookup) in &parsed_patterns {
+            let match_value = if lookup.match_field == "$.uri" {
+                record.get("uri").and_then(|v| v.as_str())
+            } else {
+                let field_path = lookup.match_field.strip_prefix("$.").unwrap_or("");
+                get_nested_str(record, field_path)
+            };
+
+            if let Some(value) = match_value {
+                lookups.push((
+                    idx,
+                    *key,
+                    lookup.collection.as_str(),
+                    lookup.field.as_str(),
+                    value.to_string(),
+                ));
             }
+        }
+    }
+
+    // Execute lookups in parallel
+    let results: Vec<(usize, &str, usize)> = lookups
+        .par_iter()
+        .map(|(idx, key, collection, field, value)| {
+            let count = app
+                .store
+                .count_by_field_value(collection, field, value)
+                .unwrap_or(0);
+            (*idx, *key, count)
+        })
+        .collect();
+
+    // Merge results back
+    for (idx, key, count) in results {
+        if let Some(record) = records.get_mut(idx) {
+            record[key] = serde_json::Value::Number(count.into());
         }
     }
 }
