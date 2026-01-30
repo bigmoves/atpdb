@@ -36,10 +36,11 @@ write_files:
         }
       }
 
-  # Environment file for docker compose
+  # Environment file for docker compose (defer until users are created)
   - path: /opt/atpdb/.env
     permissions: '0644'
     owner: deploy:deploy
+    defer: true
     content: |
       DOMAIN=${domain}
       GRAFANA_PASSWORD=${grafana_password}

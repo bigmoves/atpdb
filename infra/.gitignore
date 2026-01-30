@@ -4,6 +4,7 @@
 .terraform/
 .terraform.lock.hcl
 terraform.tfvars
+terraform.tfvars.*
 *.auto.tfvars
 
 # Docker
