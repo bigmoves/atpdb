@@ -169,17 +169,17 @@ pub fn sync_repo(
 ) -> Result<SyncResult, SyncError> {
     let start = Instant::now();
 
-    tracing::debug!("resolving DID {}", did);
+    debug!(did, "resolving DID");
     let resolved = resolve_did(did)?;
-    tracing::debug!("PDS: {}, handle: {:?}", resolved.pds, resolved.handle);
+    debug!(did, pds = %resolved.pds, handle = ?resolved.handle, "resolved DID");
 
     // Check if PDS is in backoff from previous rate limiting
     if pds_backoff().is_in_backoff(&resolved.pds) {
-        debug!(pds = resolved.pds, "PDS is in backoff, skipping");
+        debug!(did, pds = %resolved.pds, "PDS is in backoff, skipping");
         return Err(SyncError::RateLimited);
     }
 
-    tracing::debug!("fetching repo...");
+    debug!(did, pds = %resolved.pds, "fetching repo");
     let url = format!("{}/xrpc/com.atproto.sync.getRepo?did={}", resolved.pds, did);
     let response = http_client().get(&url).send()?;
 
@@ -195,7 +195,7 @@ pub fn sync_repo(
 
     let car_bytes: Vec<u8> = response.bytes()?.to_vec();
     let car_len = car_bytes.len();
-    tracing::debug!("downloaded {} bytes", car_len);
+    debug!(did, bytes = car_len, "downloaded repo");
 
     let rt = tokio::runtime::Runtime::new().unwrap();
     let mut result = rt.block_on(process_car(
