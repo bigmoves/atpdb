@@ -13,13 +13,16 @@ Server runs at `http://localhost:3000`. Query records:
 
 ```bash
 # All records in a collection
-curl "localhost:3000/query?q=at://*/app.bsky.feed.post"
+curl -X POST localhost:3000/query -H "Content-Type: application/json" \
+  -d '{"q": "at://*/app.bsky.feed.post"}'
 
 # Single user's records
-curl "localhost:3000/query?q=at://did:plc:xyz/app.bsky.feed.post"
+curl -X POST localhost:3000/query -H "Content-Type: application/json" \
+  -d '{"q": "at://did:plc:xyz/app.bsky.feed.post"}'
 
 # Exact record
-curl "localhost:3000/query?q=at://did:plc:xyz/app.bsky.feed.post/abc123"
+curl -X POST localhost:3000/query -H "Content-Type: application/json" \
+  -d '{"q": "at://did:plc:xyz/app.bsky.feed.post/abc123"}'
 ```
 
 ## Configuration
@@ -78,9 +81,9 @@ Queries use AT-URI patterns:
 | `at://did:plc:xyz/*` | All records for user |
 | `at://did:plc:xyz` | Same as above (shorthand) |
 
-### Query Parameters
+### Query Body (JSON)
 
-| Param | Description |
+| Field | Description |
 |-------|-------------|
 | `q` | The AT-URI query pattern |
 | `limit` | Max records to return (default 100, max 1000) |
@@ -90,17 +93,19 @@ Queries use AT-URI patterns:
 
 ```bash
 # Paginated, sorted by playedAt
-curl "localhost:3000/query?q=at://*/fm.teal.alpha.feed.play&sort=playedAt&limit=50"
+curl -X POST localhost:3000/query -H "Content-Type: application/json" \
+  -d '{"q": "at://*/fm.teal.alpha.feed.play", "sort": "playedAt", "limit": 50}'
 
 # Search for tracks
-curl "localhost:3000/query?q=at://*/fm.teal.alpha.feed.play&search=midnight"
+curl -X POST localhost:3000/query -H "Content-Type: application/json" \
+  -d '{"q": "at://*/fm.teal.alpha.feed.play", "search": "midnight"}'
 ```
 
 ## HTTP API
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /query` | Query records |
+| `POST /query` | Query records (JSON body) |
 | `GET /health` | Health check |
 | `GET /stats` | Database statistics |
 | `GET /metrics` | Prometheus metrics |
