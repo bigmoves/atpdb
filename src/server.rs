@@ -425,6 +425,7 @@ pub struct StatsResponse {
     tracked_repos: usize,
     mode: String,
     cursors: Vec<CursorInfo>,
+    collections: std::collections::HashMap<String, usize>,
 }
 
 #[derive(Serialize)]
@@ -594,11 +595,24 @@ async fn stats(State((app, _)): State<AppStateHandle>) -> Result<Json<StatsRespo
         .map(|(k, v)| CursorInfo { key: k, cursor: v })
         .collect();
 
+    // Get counts for configured collections
+    let mut collections = std::collections::HashMap::new();
+    for col in &config.collections {
+        // Skip wildcards
+        if col.contains('*') {
+            continue;
+        }
+        if let Ok(count) = app.store.count_collection(col) {
+            collections.insert(col.clone(), count);
+        }
+    }
+
     Ok(Json(StatsResponse {
         records,
         tracked_repos,
         mode: config.mode.to_string(),
         cursors,
+        collections,
     }))
 }
 
