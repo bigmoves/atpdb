@@ -67,7 +67,7 @@ impl AppState {
         };
         config.apply_env_overrides();
 
-        let store = Store::from_keyspace(records);
+        let store = Store::new(db.clone(), records);
         tracing::debug!("keyspaces ready: {:?}", start.elapsed());
 
         // Build missing indexes on startup

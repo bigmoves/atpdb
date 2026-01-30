@@ -101,6 +101,8 @@ fn resolve_did(did: &str) -> Result<ResolvedDid, SyncError> {
 }
 
 /// Sync a repo by DID with optional collection filtering
+/// If `is_fresh_sync` is true, uses optimized batch writes (assumes all records are new)
+#[allow(clippy::too_many_arguments)]
 pub fn sync_repo(
     did: &str,
     store: &Arc<Store>,
@@ -108,6 +110,7 @@ pub fn sync_repo(
     indexes: &[IndexConfig],
     search: Option<&SearchIndex>,
     search_fields: &[SearchFieldConfig],
+    is_fresh_sync: bool,
 ) -> Result<SyncResult, SyncError> {
     let start = Instant::now();
 
@@ -135,6 +138,7 @@ pub fn sync_repo(
         indexes,
         search,
         search_fields,
+        is_fresh_sync,
     ))?;
 
     histogram!("sync_duration_seconds").record(start.elapsed().as_secs_f64());
@@ -144,6 +148,10 @@ pub fn sync_repo(
     Ok(result)
 }
 
+/// Batch size for database writes during sync
+const SYNC_BATCH_SIZE: usize = 500;
+
+#[allow(clippy::too_many_arguments)]
 async fn process_car(
     car_bytes: &[u8],
     did: &str,
@@ -152,6 +160,7 @@ async fn process_car(
     indexes: &[IndexConfig],
     search: Option<&SearchIndex>,
     search_fields: &[SearchFieldConfig],
+    is_fresh_sync: bool,
 ) -> Result<SyncResult, SyncError> {
     let cursor = Cursor::new(car_bytes);
     let did = did.to_string();
@@ -173,6 +182,11 @@ async fn process_car(
     match driver {
         repo_stream::Driver::Memory(commit, mut driver) => {
             rev = Some(commit.rev.clone());
+            let mut batch: Vec<(AtUri, Record)> = if is_fresh_sync {
+                Vec::with_capacity(SYNC_BATCH_SIZE)
+            } else {
+                Vec::new()
+            };
 
             while let Some(chunk) = driver
                 .next_chunk(256)
@@ -199,7 +213,7 @@ async fn process_car(
                             match dagcbor_to_json(&output.data) {
                                 Ok(value) => {
                                     let record = Record {
-                                        uri: uri_str,
+                                        uri: uri_str.clone(),
                                         cid: output.cid.to_string(),
                                         value,
                                         indexed_at: SystemTime::now()
@@ -207,17 +221,47 @@ async fn process_car(
                                             .unwrap()
                                             .as_secs(),
                                     };
-                                    if store.put_with_indexes(&uri, &record, &indexes).is_ok() {
-                                        // Index for search
-                                        if let Some(search) = search {
-                                            let _ = search.index_record(
-                                                &record.uri,
-                                                collection,
-                                                &record.value,
-                                                &search_fields,
-                                            );
+
+                                    if is_fresh_sync {
+                                        // Batch writes for fresh sync
+                                        batch.push((uri, record));
+                                        if batch.len() >= SYNC_BATCH_SIZE {
+                                            match store.put_batch_with_indexes(&batch, &indexes) {
+                                                Ok(n) => {
+                                                    if let Some(search) = search {
+                                                        for (_, rec) in &batch {
+                                                            let col = rec
+                                                                .uri
+                                                                .split('/')
+                                                                .nth(3)
+                                                                .unwrap_or("");
+                                                            let _ = search.index_record(
+                                                                &rec.uri,
+                                                                col,
+                                                                &rec.value,
+                                                                &search_fields,
+                                                            );
+                                                        }
+                                                    }
+                                                    count += n;
+                                                }
+                                                Err(e) => warn!(error = %e, "Batch write error"),
+                                            }
+                                            batch.clear();
                                         }
-                                        count += 1;
+                                    } else {
+                                        // Individual writes for resync (handles existence checks)
+                                        if store.put_with_indexes(&uri, &record, &indexes).is_ok() {
+                                            if let Some(search) = search {
+                                                let _ = search.index_record(
+                                                    &record.uri,
+                                                    collection,
+                                                    &record.value,
+                                                    &search_fields,
+                                                );
+                                            }
+                                            count += 1;
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -229,6 +273,23 @@ async fn process_car(
                             warn!(uri = %uri_str, error = %e, "URI parse error");
                         }
                     }
+                }
+            }
+
+            // Flush remaining records (batch mode only)
+            if is_fresh_sync && !batch.is_empty() {
+                match store.put_batch_with_indexes(&batch, &indexes) {
+                    Ok(n) => {
+                        if let Some(search) = search {
+                            for (_, rec) in &batch {
+                                let col = rec.uri.split('/').nth(3).unwrap_or("");
+                                let _ =
+                                    search.index_record(&rec.uri, col, &rec.value, &search_fields);
+                            }
+                        }
+                        count += n;
+                    }
+                    Err(e) => warn!(error = %e, "Final batch write error"),
                 }
             }
         }
@@ -258,6 +319,11 @@ async fn process_car(
                 .map_err(|e| SyncError::Car(format!("Failed to finish loading: {}", e)))?;
 
             rev = Some(commit.rev.clone());
+            let mut batch: Vec<(AtUri, Record)> = if is_fresh_sync {
+                Vec::with_capacity(SYNC_BATCH_SIZE)
+            } else {
+                Vec::new()
+            };
 
             while let Some(chunk) = driver
                 .next_chunk(256)
@@ -281,7 +347,7 @@ async fn process_car(
                         Ok(uri) => match dagcbor_to_json(&output.data) {
                             Ok(value) => {
                                 let record = Record {
-                                    uri: uri_str,
+                                    uri: uri_str.clone(),
                                     cid: output.cid.to_string(),
                                     value,
                                     indexed_at: SystemTime::now()
@@ -289,7 +355,31 @@ async fn process_car(
                                         .unwrap()
                                         .as_secs(),
                                 };
-                                if store.put_with_indexes(&uri, &record, &indexes).is_ok() {
+
+                                if is_fresh_sync {
+                                    batch.push((uri, record));
+                                    if batch.len() >= SYNC_BATCH_SIZE {
+                                        match store.put_batch_with_indexes(&batch, &indexes) {
+                                            Ok(n) => {
+                                                if let Some(search) = search {
+                                                    for (_, rec) in &batch {
+                                                        let col =
+                                                            rec.uri.split('/').nth(3).unwrap_or("");
+                                                        let _ = search.index_record(
+                                                            &rec.uri,
+                                                            col,
+                                                            &rec.value,
+                                                            &search_fields,
+                                                        );
+                                                    }
+                                                }
+                                                count += n;
+                                            }
+                                            Err(e) => warn!(error = %e, "Batch write error"),
+                                        }
+                                        batch.clear();
+                                    }
+                                } else if store.put_with_indexes(&uri, &record, &indexes).is_ok() {
                                     if let Some(search) = search {
                                         let _ = search.index_record(
                                             &record.uri,
@@ -309,6 +399,23 @@ async fn process_car(
                             warn!(uri = %uri_str, error = %e, "URI parse error");
                         }
                     }
+                }
+            }
+
+            // Flush remaining records (batch mode only)
+            if is_fresh_sync && !batch.is_empty() {
+                match store.put_batch_with_indexes(&batch, &indexes) {
+                    Ok(n) => {
+                        if let Some(search) = search {
+                            for (_, rec) in &batch {
+                                let col = rec.uri.split('/').nth(3).unwrap_or("");
+                                let _ =
+                                    search.index_record(&rec.uri, col, &rec.value, &search_fields);
+                            }
+                        }
+                        count += n;
+                    }
+                    Err(e) => warn!(error = %e, "Final batch write error"),
                 }
             }
 

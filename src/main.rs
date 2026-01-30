@@ -861,6 +861,13 @@ fn handle_command(line: &str, app: &Arc<AppState>, running: &Arc<AtomicBool>) ->
                 let start = std::time::Instant::now();
                 let store = Arc::new(app.store.clone());
                 let config = app.config();
+
+                // Check if this is a fresh sync
+                let is_fresh_sync = match app.repos.get(did) {
+                    Ok(Some(state)) => state.last_sync.is_none(),
+                    _ => true,
+                };
+
                 match sync::sync_repo(
                     did,
                     &store,
@@ -868,6 +875,7 @@ fn handle_command(line: &str, app: &Arc<AppState>, running: &Arc<AtomicBool>) ->
                     &config.indexes,
                     app.search.as_ref(),
                     &config.search_fields,
+                    is_fresh_sync,
                 ) {
                     Ok(result) => {
                         let elapsed = start.elapsed();

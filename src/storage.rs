@@ -37,8 +37,7 @@ pub enum ScanDirection {
 
 #[derive(Clone)]
 pub struct Store {
-    #[allow(dead_code)]
-    db: Option<Database>,
+    db: Database,
     /// Records keyed by: {collection}\0{did}\0{rkey}
     /// This enables fast prefix scans for both collection-wide and per-user queries
     records: Keyspace,
@@ -52,15 +51,15 @@ impl Store {
         let db = Database::builder(path).open()?;
         let records = db.keyspace("records", KeyspaceCreateOptions::default)?;
         Ok(Store {
-            db: Some(db),
+            db,
             records,
             counter_lock: Arc::new(Mutex::new(())),
         })
     }
 
-    pub fn from_keyspace(records: Keyspace) -> Self {
+    pub fn new(db: Database, records: Keyspace) -> Self {
         Store {
-            db: None,
+            db,
             records,
             counter_lock: Arc::new(Mutex::new(())),
         }
@@ -411,6 +410,114 @@ impl Store {
         Ok(())
     }
 
+    /// Batch write multiple records with indexes (optimized for initial sync)
+    /// Assumes all records are new (skips existence check)
+    pub fn put_batch_with_indexes(
+        &self,
+        records: &[(AtUri, Record)],
+        indexes: &[IndexConfig],
+    ) -> Result<usize, StorageError> {
+        if records.is_empty() {
+            return Ok(0);
+        }
+
+        let start = Instant::now();
+        let mut batch = self.db.batch();
+        let mut collection_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut reverse_counts: std::collections::HashMap<(String, String, String), usize> =
+            std::collections::HashMap::new();
+
+        for (uri, record) in records {
+            // Primary record
+            let key = Self::storage_key_from_uri(uri);
+            let value = serde_json::to_vec(record)?;
+            batch.insert(&self.records, &key, &value);
+
+            // indexedAt indexes (both directions)
+            let key_asc = Self::indexed_at_key_asc(
+                uri.collection.as_str(),
+                record.indexed_at,
+                uri.did.as_str(),
+                uri.rkey.as_str(),
+            );
+            batch.insert(&self.records, &key_asc, b"");
+            let key_desc = Self::indexed_at_key_desc(
+                uri.collection.as_str(),
+                record.indexed_at,
+                uri.did.as_str(),
+                uri.rkey.as_str(),
+            );
+            batch.insert(&self.records, &key_desc, b"");
+
+            // Configured indexes
+            for index in indexes {
+                if index.collection == uri.collection.as_str() {
+                    if let Ok(Some(sv)) =
+                        self.extract_sort_value(&record.value, &index.field, index.field_type)
+                    {
+                        if index.field_type == IndexFieldType::AtUri {
+                            let key = Self::reverse_index_key(
+                                &index.collection,
+                                &index.field,
+                                &sv,
+                                uri.did.as_str(),
+                                uri.rkey.as_str(),
+                            );
+                            batch.insert(&self.records, &key, b"");
+                            // Track reverse counts for batch update
+                            *reverse_counts
+                                .entry((index.collection.clone(), index.field.clone(), sv))
+                                .or_insert(0) += 1;
+                        } else {
+                            let record_bytes = serde_json::to_vec(record)?;
+                            let key = match index.direction {
+                                IndexDirection::Asc => Self::index_key_asc(
+                                    &index.collection,
+                                    &index.field,
+                                    &sv,
+                                    uri.did.as_str(),
+                                    uri.rkey.as_str(),
+                                ),
+                                IndexDirection::Desc => Self::index_key_desc(
+                                    &index.collection,
+                                    &index.field,
+                                    &sv,
+                                    uri.did.as_str(),
+                                    uri.rkey.as_str(),
+                                ),
+                            };
+                            batch.insert(&self.records, &key, &record_bytes);
+                        }
+                    }
+                }
+            }
+
+            // Track collection counts
+            *collection_counts
+                .entry(uri.collection.to_string())
+                .or_insert(0) += 1;
+        }
+
+        // Commit the batch
+        batch.commit()?;
+
+        // Update collection counts (after batch commit)
+        for (collection, count) in &collection_counts {
+            self.increment_count_by(collection, *count)?;
+        }
+
+        // Update reverse lookup counts (after batch commit)
+        for ((collection, field, value), count) in &reverse_counts {
+            self.increment_reverse_count_by(collection, field, value, *count)?;
+        }
+
+        let count = records.len();
+        histogram!("storage_operation_seconds", "op" => "put_batch")
+            .record(start.elapsed().as_secs_f64());
+        Ok(count)
+    }
+
     /// Delete record with indexes
     pub fn delete_with_indexes(
         &self,
@@ -673,6 +780,32 @@ impl Store {
         let key = Self::reverse_count_key(collection, field, field_value);
         let current = self.get_count_raw(&key)?;
         self.records.insert(&key, (current + 1).to_le_bytes())?;
+        Ok(())
+    }
+
+    /// Increment collection counter by amount (atomic via lock)
+    fn increment_count_by(&self, collection: &str, amount: usize) -> Result<(), StorageError> {
+        let _guard = self.counter_lock.lock();
+        let key = Self::count_key(collection);
+        let current = self.get_count_raw(&key)?;
+        self.records
+            .insert(&key, (current + amount as u64).to_le_bytes())?;
+        Ok(())
+    }
+
+    /// Increment reverse lookup counter by amount (atomic via lock)
+    fn increment_reverse_count_by(
+        &self,
+        collection: &str,
+        field: &str,
+        field_value: &str,
+        amount: usize,
+    ) -> Result<(), StorageError> {
+        let _guard = self.counter_lock.lock();
+        let key = Self::reverse_count_key(collection, field, field_value);
+        let current = self.get_count_raw(&key)?;
+        self.records
+            .insert(&key, (current + amount as u64).to_le_bytes())?;
         Ok(())
     }
 

@@ -1264,6 +1264,13 @@ async fn sync_handler(
     let indexes = config.indexes.clone();
     let search = app.search.clone();
     let search_fields = config.search_fields.clone();
+
+    // Check if this is a fresh sync (never synced before)
+    let is_fresh_sync = match app.repos.get(&did) {
+        Ok(Some(state)) => state.last_sync.is_none(),
+        _ => true,
+    };
+
     let result = tokio::task::spawn_blocking(move || {
         sync::sync_repo(
             &payload.did,
@@ -1272,6 +1279,7 @@ async fn sync_handler(
             &indexes,
             search.as_ref(),
             &search_fields,
+            is_fresh_sync,
         )
     })
     .await

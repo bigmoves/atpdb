@@ -107,6 +107,12 @@ impl SyncWorker {
 }
 
 async fn sync_one_repo(app: &AppState, did: &str) {
+    // Check if this is a fresh sync (never synced before)
+    let is_fresh_sync = match app.repos.get(did) {
+        Ok(Some(state)) => state.last_sync.is_none(),
+        _ => true, // Assume fresh if we can't read state
+    };
+
     // Update status to syncing
     if let Ok(Some(mut state)) = app.repos.get(did) {
         state.status = RepoStatus::Syncing;
@@ -134,6 +140,7 @@ async fn sync_one_repo(app: &AppState, did: &str) {
             &indexes,
             search.as_ref(),
             &search_fields,
+            is_fresh_sync,
         )
     })
     .await;
