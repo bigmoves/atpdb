@@ -113,8 +113,7 @@ runcmd:
 
   # Download latest atpdb release
   - |
-    LATEST=$(curl -s https://api.github.com/repos/${github_repo}/releases/latest | jq -r .tag_name)
-    curl -L -o /usr/local/bin/atpdb "https://github.com/${github_repo}/releases/download/$LATEST/atpdb-linux-amd64"
+    curl -L -o /usr/local/bin/atpdb "https://github.com/${github_repo}/releases/download/latest/atpdb-linux-amd64"
     chmod +x /usr/local/bin/atpdb
 
   # Clone repo for docker configs

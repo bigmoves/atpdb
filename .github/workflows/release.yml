@@ -2,8 +2,7 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -23,10 +22,12 @@ jobs:
       - name: Rename binary
         run: mv target/release/atpdb target/release/atpdb-linux-amd64
 
-      - name: Create Release
+      - name: Update latest release
         uses: softprops/action-gh-release@v1
         with:
+          tag_name: latest
+          name: Latest Build
           files: target/release/atpdb-linux-amd64
-          generate_release_notes: true
+          prerelease: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
