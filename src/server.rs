@@ -984,6 +984,7 @@ async fn query_handler(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_unsorted_query(
     app: &AppState,
     parsed: &Query,
@@ -1047,6 +1048,7 @@ async fn execute_unsorted_query(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn execute_search_query(
     app: &AppState,
     parsed: &Query,
