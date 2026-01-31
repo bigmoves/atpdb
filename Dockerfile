@@ -34,7 +34,7 @@ RUN mkdir -p /app/data && chown atpdb:atpdb /app/data
 
 WORKDIR /app
 
-ENV ATPDB_DATA_DIR=/app/data
+ENV ATPDB_DATA_DIR=/app/data/db
 
 COPY --from=builder /app/target/release/atpdb ./atpdb
 RUN chown atpdb:atpdb /app/atpdb
