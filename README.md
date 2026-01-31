@@ -10,6 +10,7 @@ Index [teal.fm](https://teal.fm) music plays:
 
 ```bash
 ATPDB_MODE=signal \
+ATPDB_RELAY=wss://relay1.us-east.bsky.network \
 ATPDB_SIGNAL_COLLECTION=fm.teal.alpha.feed.play \
 ATPDB_COLLECTIONS=fm.teal.alpha.feed.play,app.bsky.actor.profile \
 cargo run -- serve
