@@ -135,13 +135,12 @@ impl Crawler {
                 }
             }
 
-            // Save cursor for resumability
+            // Save cursor for resumability (keep it even when done, like indigo)
             if let Some(ref c) = response.cursor {
                 let _ = self.app.set_cursor(&cursor_key, c);
                 cursor = Some(c.clone());
             } else {
-                // Done - clear cursor for next full run
-                let _ = self.app.set_cursor(&cursor_key, "");
+                // Done - keep cursor so we don't re-enumerate everything next run
                 break;
             }
 
@@ -206,7 +205,7 @@ impl Crawler {
                 let _ = self.app.set_cursor(&cursor_key, c);
                 cursor = Some(c.clone());
             } else {
-                let _ = self.app.set_cursor(&cursor_key, "");
+                // Done - keep cursor so we don't re-enumerate everything next run
                 break;
             }
 
@@ -245,13 +244,29 @@ impl Crawler {
     }
 }
 
-/// Start crawler in background thread
+/// How often to re-run the crawler (5 minutes)
+const CRAWLER_INTERVAL_SECS: u64 = 300;
+
+/// Start crawler in background thread (loops continuously)
 pub fn start_crawler(app: Arc<AppState>, sync_handle: Arc<SyncHandle>, running: Arc<AtomicBool>) {
     std::thread::spawn(move || {
-        let crawler = Crawler::new(app, sync_handle, running);
-        match crawler.run_based_on_mode() {
-            Ok(count) => info!(count, "Crawler: discovered new repos"),
-            Err(e) => error!(error = %e, "Crawler error"),
+        let crawler = Crawler::new(app, sync_handle, running.clone());
+
+        while running.load(std::sync::atomic::Ordering::Relaxed) {
+            match crawler.run_based_on_mode() {
+                Ok(count) => info!(count, "Crawler: discovered new repos"),
+                Err(e) => error!(error = %e, "Crawler error"),
+            }
+
+            // Wait before next run (check running flag periodically)
+            for _ in 0..(CRAWLER_INTERVAL_SECS / 5) {
+                if !running.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(5));
+            }
         }
+
+        info!("Crawler: shutdown complete");
     });
 }
