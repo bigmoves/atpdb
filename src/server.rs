@@ -230,9 +230,9 @@ fn transform_blob_at_path(value: &mut serde_json::Value, path: &str, did: &str, 
 
 /// Validate hydration keys and return them sorted by depth
 /// Returns error message if validation fails
-fn validate_and_sort_hydration_keys<'a>(
-    hydrate: &'a HashMap<String, String>,
-) -> Result<Vec<(&'a str, &'a str, usize)>, String> {
+fn validate_and_sort_hydration_keys(
+    hydrate: &HashMap<String, String>,
+) -> Result<Vec<(&str, &str, usize)>, String> {
     let mut keys_with_depth: Vec<(&str, &str, usize)> = Vec::new();
 
     for (key, pattern) in hydrate {
@@ -271,8 +271,7 @@ fn validate_and_sort_hydration_keys<'a>(
 /// Example: "author.avatar" -> "author.value.avatar" for blob paths
 fn normalize_nested_path(path: &str, hydration_keys: &[&str]) -> String {
     // For patterns starting with $. (hydration patterns)
-    if path.starts_with("$.") {
-        let rest = &path[2..];
+    if let Some(rest) = path.strip_prefix("$.") {
         if rest.starts_with("value.") || rest == "uri" || rest == "did" || rest == "cid" {
             return path.to_string();
         }
@@ -311,8 +310,8 @@ fn hydrate_nested_forward(
     let store = &app.store;
 
     // Parse pattern to extract field reference (e.g., "$.item" -> "value.item")
-    let field_path = if pattern.starts_with("at://$.") {
-        let raw = &pattern[7..]; // Remove "at://$."
+    let field_path = if let Some(raw) = pattern.strip_prefix("at://$.") {
+        // Remove "at://$."
         if raw.starts_with("value.") {
             raw.to_string()
         } else {
@@ -509,8 +508,9 @@ fn hydrate_nested_reverse(
 /// Supports two pattern types:
 /// 1. Forward hydration: "at://$.did/collection/rkey" - fetch a specific record by DID
 /// 2. Reverse hydration: "at://*/collection/*?field=$.uri" - fetch records that reference this record
-/// Supports nested hydration with dot notation (e.g., "items.photo") up to 2 levels
-/// Returns an error message if hydration config is invalid
+///
+/// Supports nested hydration with dot notation (e.g., "items.photo") up to 2 levels.
+/// Returns an error message if hydration config is invalid.
 fn hydrate_records(
     records: &mut [serde_json::Value],
     hydrate: &HashMap<String, String>,
@@ -761,11 +761,11 @@ pub struct StatsResponse {
 
 #[derive(Serialize)]
 pub struct KeyCounts {
-    primary: usize,       // actual records ({collection}\0{did}\0{rkey})
-    indexes_asc: usize,   // idx:a:* (ascending indexes)
-    indexes_desc: usize,  // idx:d:* (descending indexes)
-    reverse: usize,       // rev:* (AtUri field indexes)
-    counts: usize,        // __count__:* and __revcount__:*
+    primary: usize,      // actual records ({collection}\0{did}\0{rkey})
+    indexes_asc: usize,  // idx:a:* (ascending indexes)
+    indexes_desc: usize, // idx:d:* (descending indexes)
+    reverse: usize,      // rev:* (AtUri field indexes)
+    counts: usize,       // __count__:* and __revcount__:*
 }
 
 #[derive(Serialize)]
@@ -1190,12 +1190,12 @@ async fn query_handler(
         return execute_search_query(
             &app,
             &parsed,
-            &search_fields,
+            search_fields,
             limit,
             sort.as_deref(),
             &hydrate,
             &payload.blobs,
-            &count_fields,
+            count_fields,
         )
         .await;
     }
@@ -1227,7 +1227,7 @@ async fn query_handler(
                     &hydrate,
                     &payload.blobs,
                     payload.include_total,
-                    &count_fields,
+                    count_fields,
                 )
                 .await;
             }
@@ -1313,13 +1313,12 @@ async fn query_handler(
 
         // Apply hydration if requested
         if !hydrate.is_empty() || !payload.blobs.is_empty() {
-            hydrate_records(&mut values, &hydrate, &payload.blobs, &app).map_err(|e| {
-                (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e }))
-            })?;
+            hydrate_records(&mut values, &hydrate, &payload.blobs, &app)
+                .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
         }
 
         // Execute count.* reverse lookups
-        execute_count_lookups(&mut values, &count_fields, &app);
+        execute_count_lookups(&mut values, count_fields, &app);
 
         // Get count if requested
         let total = if payload.include_total {
@@ -1344,7 +1343,7 @@ async fn query_handler(
         &hydrate,
         &payload.blobs,
         payload.include_total,
-        &count_fields,
+        count_fields,
     )
     .await
 }
@@ -1385,9 +1384,8 @@ async fn execute_unsorted_query(
 
     // Apply hydration if requested
     if !hydrate.is_empty() || !blobs.is_empty() {
-        hydrate_records(&mut values, hydrate, blobs, app).map_err(|e| {
-            (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e }))
-        })?;
+        hydrate_records(&mut values, hydrate, blobs, app)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
     }
 
     // Execute count.* reverse lookups
@@ -1573,9 +1571,8 @@ async fn execute_search_query(
 
     // Apply hydration if requested (also handles multi-segment blob paths)
     if !hydrate.is_empty() || !blobs.is_empty() {
-        hydrate_records(&mut records, hydrate, blobs, app).map_err(|e| {
-            (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e }))
-        })?;
+        hydrate_records(&mut records, hydrate, blobs, app)
+            .map_err(|e| (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e })))?;
     }
 
     // Execute count.* reverse lookups
@@ -2301,10 +2298,7 @@ mod tests {
 
         // Hydration patterns
         assert_eq!(normalize_nested_path("$.item", &keys), "$.value.item");
-        assert_eq!(
-            normalize_nested_path("$.value.item", &keys),
-            "$.value.item"
-        );
+        assert_eq!(normalize_nested_path("$.value.item", &keys), "$.value.item");
         assert_eq!(normalize_nested_path("$.uri", &keys), "$.uri");
 
         // Blob paths
@@ -2326,10 +2320,7 @@ mod tests {
     fn test_validate_hydration_keys_valid() {
         let mut hydrate = HashMap::new();
         hydrate.insert("author".to_string(), "at://$.did/col/rkey".to_string());
-        hydrate.insert(
-            "items".to_string(),
-            "at://*/col/*?field=$.uri".to_string(),
-        );
+        hydrate.insert("items".to_string(), "at://*/col/*?field=$.uri".to_string());
         hydrate.insert("items.photo".to_string(), "at://$.item".to_string());
 
         let result = validate_and_sort_hydration_keys(&hydrate);
