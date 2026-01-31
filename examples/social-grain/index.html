@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Social Grain Galleries</title>
+    <style>
+        * {
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a0a;
+            color: #e0e0e0;
+            margin: 0;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+        h1 {
+            color: #10b981;
+            font-size: 1.5rem;
+            margin-bottom: 8px;
+        }
+        .subtitle {
+            color: #666;
+            font-size: 0.875rem;
+            margin-bottom: 24px;
+        }
+        .query-box {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 12px;
+            margin-bottom: 24px;
+            font-family: monospace;
+            font-size: 0.75rem;
+            overflow-x: auto;
+        }
+        .query-box pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .query-box .key {
+            color: #10b981;
+        }
+        .query-box .string {
+            color: #f59e0b;
+        }
+        .stats {
+            display: flex;
+            gap: 16px;
+            margin-bottom: 24px;
+            font-size: 0.875rem;
+            color: #888;
+        }
+        .gallery-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+        }
+        .gallery-card {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            border-radius: 12px;
+            overflow: hidden;
+            transition: border-color 0.2s, transform 0.2s;
+        }
+        .gallery-card:hover {
+            border-color: #10b981;
+            transform: translateY(-2px);
+        }
+        .gallery-cover {
+            aspect-ratio: 16/9;
+            background: linear-gradient(135deg, #1f2937, #111827);
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            grid-template-rows: repeat(2, 1fr);
+            gap: 2px;
+            overflow: hidden;
+        }
+        .gallery-cover img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .gallery-cover .placeholder {
+            background: linear-gradient(135deg, #374151, #1f2937);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #4b5563;
+            font-size: 1.5rem;
+        }
+        .gallery-info {
+            padding: 16px;
+        }
+        .gallery-header {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+        }
+        .avatar {
+            width: 36px;
+            height: 36px;
+            border-radius: 50%;
+            background: linear-gradient(135deg, #10b981, #059669);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 0.875rem;
+            object-fit: cover;
+            flex-shrink: 0;
+        }
+        .gallery-title {
+            font-weight: 600;
+            font-size: 1rem;
+            margin-bottom: 2px;
+            color: #f3f4f6;
+        }
+        .gallery-author {
+            font-size: 0.75rem;
+            color: #10b981;
+        }
+        .gallery-description {
+            font-size: 0.875rem;
+            color: #9ca3af;
+            margin-bottom: 12px;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+        .gallery-footer {
+            display: flex;
+            gap: 16px;
+            font-size: 0.875rem;
+            color: #666;
+        }
+        .gallery-stat {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .gallery-stat.favorites {
+            color: #ef4444;
+        }
+        .gallery-stat.comments {
+            color: #3b82f6;
+        }
+        .gallery-stat.photos {
+            color: #10b981;
+        }
+        .timestamp {
+            font-size: 0.75rem;
+            color: #555;
+            margin-top: 8px;
+        }
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+        .error {
+            background: #2d1515;
+            border: 1px solid #5c2020;
+            border-radius: 8px;
+            padding: 16px;
+            color: #f87171;
+        }
+        .controls {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        button {
+            background: #10b981;
+            color: #fff;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        button:hover {
+            background: #059669;
+        }
+        button:disabled {
+            background: #333;
+            color: #666;
+            cursor: not-allowed;
+        }
+        input {
+            background: #1a1a1a;
+            border: 1px solid #333;
+            color: #e0e0e0;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-family: monospace;
+            flex: 1;
+        }
+        input:focus {
+            outline: none;
+            border-color: #10b981;
+        }
+        .nested-badge {
+            display: inline-block;
+            background: #10b981;
+            color: #000;
+            font-size: 0.625rem;
+            font-weight: 600;
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-left: 8px;
+            text-transform: uppercase;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Social Grain Galleries <span class="nested-badge">Nested Hydration</span></h1>
+        <p class="subtitle">Powered by atpdb with nested hydration for gallery items and photos</p>
+
+        <div class="controls">
+            <input type="text" id="api-url" value="http://localhost:3000" placeholder="API URL">
+            <button onclick="loadGalleries()">Refresh</button>
+        </div>
+
+        <div class="query-box" id="query-display">
+            <pre>{
+  <span class="key">"collection"</span>: <span class="string">"social.grain.gallery"</span>,
+  <span class="key">"hydrate"</span>: {
+    <span class="key">"author"</span>: <span class="string">"at://$.did/social.grain.actor.profile/self"</span>,
+    <span class="key">"items"</span>: <span class="string">"at://*/social.grain.gallery.item/*?gallery=$.uri&limit=4"</span>,
+    <span class="key">"items.photo"</span>: <span class="string">"at://$.item"</span>  // nested!
+  }
+}</pre>
+        </div>
+
+        <div class="stats" id="stats">
+            <span id="record-count">Loading...</span>
+            <span id="query-time"></span>
+        </div>
+
+        <div class="gallery-grid" id="galleries">
+            <div class="loading">Connecting to atpdb...</div>
+        </div>
+
+        <div id="load-more-container" style="text-align: center; margin-top: 24px; display: none;">
+            <button id="load-more-btn" onclick="loadMore()">Load More</button>
+        </div>
+    </div>
+
+    <script>
+        let currentCursor = null;
+        let allRecords = [];
+        let totalCount = null;
+        const PAGE_SIZE = 20;
+
+        function truncateDid(did) {
+            if (did.length > 24) {
+                return did.slice(0, 16) + '...' + did.slice(-6);
+            }
+            return did;
+        }
+
+        function getInitials(name) {
+            if (!name) return '??';
+            return name.slice(0, 2).toUpperCase();
+        }
+
+        function escapeHtml(str) {
+            if (!str) return '';
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
+        }
+
+        function extractDidFromUri(uri) {
+            const match = uri.match(/at:\/\/([^/]+)/);
+            return match ? match[1] : 'unknown';
+        }
+
+        function renderGallery(record) {
+            const did = extractDidFromUri(record.uri);
+            const value = record.value || {};
+            const author = record.author;
+            const items = record.items || [];
+
+            const title = value.title || 'Untitled Gallery';
+            const description = value.description || '';
+            const createdAt = value.createdAt;
+
+            // Author info from hydrated profile
+            const displayName = author?.value?.displayName || truncateDid(did);
+            const avatarUrl = author?.value?.avatar?.url;
+            const handle = record.handle;
+
+            const avatarHtml = avatarUrl
+                ? `<img src="${avatarUrl}" class="avatar" alt="${escapeHtml(displayName)}">`
+                : `<div class="avatar">${getInitials(displayName)}</div>`;
+
+            // Get up to 4 photos for the cover grid (from nested hydration!)
+            const coverPhotos = items
+                .slice(0, 4)
+                .map(item => item.photo?.value?.photo?.url)
+                .filter(Boolean);
+
+            // Fill remaining slots with placeholders
+            const coverHtml = [];
+            for (let i = 0; i < 4; i++) {
+                if (coverPhotos[i]) {
+                    coverHtml.push(`<img src="${coverPhotos[i]}" alt="Gallery photo">`);
+                } else {
+                    coverHtml.push(`<div class="placeholder">${i < items.length ? '?' : ''}</div>`);
+                }
+            }
+
+            // Counts from reverse lookups
+            const favoriteCount = record.favoriteCount || 0;
+            const commentCount = record.commentCount || 0;
+            const photoCount = items.length;
+
+            return `
+                <div class="gallery-card">
+                    <div class="gallery-cover">
+                        ${coverHtml.join('')}
+                    </div>
+                    <div class="gallery-info">
+                        <div class="gallery-header">
+                            ${avatarHtml}
+                            <div>
+                                <div class="gallery-title">${escapeHtml(title)}</div>
+                                <div class="gallery-author">${handle ? '@' + escapeHtml(handle) : truncateDid(did)}</div>
+                            </div>
+                        </div>
+                        ${description ? `<div class="gallery-description">${escapeHtml(description)}</div>` : ''}
+                        <div class="gallery-footer">
+                            <div class="gallery-stat photos">
+                                <span>&#x1F4F7;</span>
+                                <span>${photoCount}</span>
+                            </div>
+                            <div class="gallery-stat favorites">
+                                <span>&#x2665;</span>
+                                <span>${favoriteCount}</span>
+                            </div>
+                            <div class="gallery-stat comments">
+                                <span>&#x1F4AC;</span>
+                                <span>${commentCount}</span>
+                            </div>
+                        </div>
+                        ${createdAt ? `<div class="timestamp">${new Date(createdAt).toLocaleDateString()}</div>` : ''}
+                    </div>
+                </div>
+            `;
+        }
+
+        async function loadGalleries() {
+            currentCursor = null;
+            allRecords = [];
+            totalCount = null;
+
+            const galleriesEl = document.getElementById('galleries');
+            const loadMoreContainer = document.getElementById('load-more-container');
+
+            galleriesEl.innerHTML = '<div class="loading">Loading galleries...</div>';
+            loadMoreContainer.style.display = 'none';
+
+            await fetchPage(true);
+        }
+
+        async function loadMore() {
+            const btn = document.getElementById('load-more-btn');
+            btn.disabled = true;
+            btn.textContent = 'Loading...';
+            await fetchPage(false);
+            btn.disabled = false;
+            btn.textContent = 'Load More';
+        }
+
+        async function fetchPage(isFirstPage) {
+            const galleriesEl = document.getElementById('galleries');
+            const statsEl = document.getElementById('record-count');
+            const timeEl = document.getElementById('query-time');
+            const loadMoreContainer = document.getElementById('load-more-container');
+            const apiUrl = document.getElementById('api-url').value;
+
+            const startTime = performance.now();
+
+            try {
+                // Build the query with nested hydration
+                const body = {
+                    collection: 'social.grain.gallery',
+                    limit: PAGE_SIZE,
+                    sort: 'createdAt:datetime:desc',
+                    hydrate: {
+                        // Level 0: author profile
+                        author: 'at://$.did/social.grain.actor.profile/self',
+                        // Level 0: gallery items (reverse lookup)
+                        items: 'at://*/social.grain.gallery.item/*?gallery=$.uri&limit=4',
+                        // Level 1: nested! each item's photo
+                        'items.photo': 'at://$.item'
+                    },
+                    blobs: {
+                        // Level 0 blob: author avatar
+                        'author.avatar': 'avatar',
+                        // Level 1 blob: nested photo thumbnails
+                        'items.photo.photo': 'feed_thumbnail'
+                    },
+                    count: {
+                        favoriteCount: 'at://*/social.grain.favorite/*?subject=$.uri',
+                        commentCount: 'at://*/social.grain.comment/*?subject=$.uri'
+                    },
+                    include_total: isFirstPage
+                };
+
+                if (currentCursor) {
+                    body.cursor = currentCursor;
+                }
+
+                const response = await fetch(`${apiUrl}/query`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(body)
+                });
+
+                const endTime = performance.now();
+
+                if (!response.ok) {
+                    const error = await response.json();
+                    throw new Error(error.error || 'Query failed');
+                }
+
+                const data = await response.json();
+
+                currentCursor = data.cursor;
+
+                if (data.total !== undefined) {
+                    totalCount = data.total;
+                }
+
+                allRecords = allRecords.concat(data.records);
+
+                const hasMore = data.cursor !== null;
+                if (totalCount !== null) {
+                    statsEl.textContent = `${totalCount.toLocaleString()} galleries`;
+                } else {
+                    statsEl.textContent = `${allRecords.length} galleries${hasMore ? '+' : ''}`;
+                }
+                timeEl.textContent = `(${(endTime - startTime).toFixed(0)}ms)`;
+
+                if (allRecords.length === 0) {
+                    galleriesEl.innerHTML = '<div class="loading">No galleries found. Make sure you have social.grain data indexed!</div>';
+                    loadMoreContainer.style.display = 'none';
+                    return;
+                }
+
+                galleriesEl.innerHTML = allRecords.map(renderGallery).join('');
+                loadMoreContainer.style.display = hasMore ? 'block' : 'none';
+
+            } catch (err) {
+                if (isFirstPage) {
+                    galleriesEl.innerHTML = `<div class="error">
+                        <strong>Error:</strong> ${escapeHtml(err.message)}<br><br>
+                        Make sure atpdb is running with Social Grain collections configured.<br><br>
+                        See README.md for configuration details.
+                    </div>`;
+                }
+                statsEl.textContent = 'Error';
+                timeEl.textContent = '';
+                loadMoreContainer.style.display = 'none';
+            }
+        }
+
+        loadGalleries();
+    </script>
+</body>
+</html>

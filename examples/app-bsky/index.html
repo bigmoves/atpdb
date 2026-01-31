@@ -380,9 +380,11 @@
                     blobs: {
                         'author.avatar': 'avatar'
                     },
-                    'count.likes': 'at://*/app.bsky.feed.like/*?subject.uri=$.uri',
-                    'count.reposts': 'at://*/app.bsky.feed.repost/*?subject.uri=$.uri',
-                    include_count: isFirstPage
+                    count: {
+                        likes: 'at://*/app.bsky.feed.like/*?subject.uri=$.uri',
+                        reposts: 'at://*/app.bsky.feed.repost/*?subject.uri=$.uri'
+                    },
+                    include_total: isFirstPage
                 };
                 if (currentCursor) {
                     body.cursor = currentCursor;
@@ -392,8 +394,8 @@
                     queryDisplay.innerHTML = buildQueryDisplayHtml(baseUri, {
                         sort: body.sort,
                         'hydrate.author': body.hydrate.author,
-                        'count.likes': body['count.likes'],
-                        'count.reposts': body['count.reposts']
+                        'count.likes': body.count.likes,
+                        'count.reposts': body.count.reposts
                     });
                 }
 
@@ -492,7 +494,7 @@
             try {
                 const body = {
                     q: baseUri,
-                    'search.text': query,
+                    search: {text: query},
                     limit: 50,
                     hydrate: {
                         author: 'at://$.did/app.bsky.actor.profile/self'
@@ -500,8 +502,10 @@
                     blobs: {
                         'author.avatar': 'avatar'
                     },
-                    'count.likes': 'at://*/app.bsky.feed.like/*?subject.uri=$.uri',
-                    'count.reposts': 'at://*/app.bsky.feed.repost/*?subject.uri=$.uri'
+                    count: {
+                        likes: 'at://*/app.bsky.feed.like/*?subject.uri=$.uri',
+                        reposts: 'at://*/app.bsky.feed.repost/*?subject.uri=$.uri'
+                    }
                 };
 
                 const response = await fetch(`${apiUrl}/query`, {

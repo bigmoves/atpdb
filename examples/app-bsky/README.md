@@ -40,20 +40,25 @@ curl -X POST localhost:3000/query -H "Content-Type: application/json" \
   -d '{
     "q": "at://*/app.bsky.feed.post/*",
     "sort": "createdAt:datetime:desc",
-    "hydrate.author": "at://$.did/app.bsky.actor.profile/self",
-    "count.likes": "at://*/app.bsky.feed.like/*?subject.uri=$.uri",
-    "count.reposts": "at://*/app.bsky.feed.repost/*?subject.uri=$.uri"
+    "hydrate": {"author": "at://$.did/app.bsky.actor.profile/self"},
+    "count": {
+      "likes": "at://*/app.bsky.feed.like/*?subject.uri=$.uri",
+      "reposts": "at://*/app.bsky.feed.repost/*?subject.uri=$.uri"
+    }
   }'
 
 # Search posts
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
-  -d '{"q": "at://*/app.bsky.feed.post/*", "search.text": "hello"}'
+  -d '{
+    "q": "at://*/app.bsky.feed.post/*",
+    "search": {"text": "hello"}
+  }'
 
 # Get likes on a specific post (reverse hydration)
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
   -d '{
     "q": "at://did:plc:example/app.bsky.feed.post/abc123",
-    "hydrate.likers": "at://*/app.bsky.feed.like/*?subject.uri=$.uri&limit=10"
+    "hydrate": {"likers": "at://*/app.bsky.feed.like/*?subject.uri=$.uri&limit=10"}
   }'
 ```
 

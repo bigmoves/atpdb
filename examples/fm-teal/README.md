@@ -37,13 +37,24 @@ Features:
 ```bash
 # Latest plays, sorted by time
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
-  -d '{"q": "at://*/fm.teal.alpha.feed.play/*", "sort": "playedTime:datetime:desc", "limit": 50}'
+  -d '{
+    "q": "at://*/fm.teal.alpha.feed.play/*",
+    "sort": "playedTime:datetime:desc",
+    "limit": 50
+  }'
 
 # Search for tracks
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
-  -d '{"q": "at://*/fm.teal.alpha.feed.play/*", "search.trackName": "midnight"}'
+  -d '{
+    "q": "at://*/fm.teal.alpha.feed.play/*",
+    "search": {"trackName": "midnight"}
+  }'
 
 # With hydrated profiles
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
-  -d '{"q": "at://*/fm.teal.alpha.feed.play/*", "hydrate.author": "at://$.did/app.bsky.actor.profile/self", "blobs.author.avatar": "avatar"}'
+  -d '{
+    "q": "at://*/fm.teal.alpha.feed.play/*",
+    "hydrate": {"author": "at://$.did/app.bsky.actor.profile/self"},
+    "blobs": {"author.avatar": "avatar"}
+  }'
 ```

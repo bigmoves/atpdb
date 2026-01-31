@@ -228,35 +228,325 @@ fn transform_blob_at_path(value: &mut serde_json::Value, path: &str, did: &str, 
     }
 }
 
+/// Validate hydration keys and return them sorted by depth
+/// Returns error message if validation fails
+fn validate_and_sort_hydration_keys<'a>(
+    hydrate: &'a HashMap<String, String>,
+) -> Result<Vec<(&'a str, &'a str, usize)>, String> {
+    let mut keys_with_depth: Vec<(&str, &str, usize)> = Vec::new();
+
+    for (key, pattern) in hydrate {
+        let depth = key.matches('.').count();
+
+        // Max depth is 1 (2 levels total)
+        if depth > 1 {
+            return Err(format!(
+                "hydration key '{}' exceeds max depth of 2 levels",
+                key
+            ));
+        }
+
+        // If depth > 0, verify parent exists
+        if depth > 0 {
+            let parent = key.split('.').next().unwrap();
+            if !hydrate.contains_key(parent) {
+                return Err(format!(
+                    "hydration key '{}' requires parent '{}' to be defined",
+                    key, parent
+                ));
+            }
+        }
+
+        keys_with_depth.push((key.as_str(), pattern.as_str(), depth));
+    }
+
+    // Sort by depth (0 first, then 1)
+    keys_with_depth.sort_by_key(|(_, _, depth)| *depth);
+
+    Ok(keys_with_depth)
+}
+
+/// Normalize a nested field path by inserting 'value.' after hydration keys
+/// Example: "$.item" -> "$.value.item" for hydration patterns
+/// Example: "author.avatar" -> "author.value.avatar" for blob paths
+fn normalize_nested_path(path: &str, hydration_keys: &[&str]) -> String {
+    // For patterns starting with $. (hydration patterns)
+    if path.starts_with("$.") {
+        let rest = &path[2..];
+        if rest.starts_with("value.") || rest == "uri" || rest == "did" || rest == "cid" {
+            return path.to_string();
+        }
+        return format!("$.value.{}", rest);
+    }
+
+    // For blob paths like "author.avatar" or "items.photo.photo"
+    let parts: Vec<&str> = path.split('.').collect();
+    let mut result = Vec::new();
+
+    for (i, part) in parts.iter().enumerate() {
+        result.push(*part);
+        // If this part is a hydration key, there's a next part, and next part isn't "value", insert "value"
+        if hydration_keys.contains(part)
+            && i + 1 < parts.len()
+            && parts.get(i + 1) != Some(&"value")
+        {
+            result.push("value");
+        }
+    }
+
+    result.join(".")
+}
+
+/// Apply forward hydration to nested records (level 1)
+/// parent_key: "items", child_key: "photo", pattern: "at://$.item"
+fn hydrate_nested_forward(
+    records: &mut [serde_json::Value],
+    parent_key: &str,
+    child_key: &str,
+    pattern: &str,
+    blobs: &HashMap<String, String>,
+    hydration_keys: &[&str],
+    app: &AppState,
+) {
+    let store = &app.store;
+
+    // Parse pattern to extract field reference (e.g., "$.item" -> "value.item")
+    let field_path = if pattern.starts_with("at://$.") {
+        let raw = &pattern[7..]; // Remove "at://$."
+        if raw.starts_with("value.") {
+            raw.to_string()
+        } else {
+            format!("value.{}", raw)
+        }
+    } else {
+        return; // Invalid pattern for nested forward hydration
+    };
+
+    // Collect all URIs to fetch: (record_idx, nested_idx (None=single object), target_uri)
+    let mut lookups: Vec<(usize, Option<usize>, String)> = Vec::new();
+
+    for (rec_idx, record) in records.iter().enumerate() {
+        let nested_array = match record.get(parent_key) {
+            Some(serde_json::Value::Array(arr)) => arr,
+            Some(obj) if obj.is_object() => {
+                // Single object, treat as array of 1
+                if let Some(uri) = get_nested_str(obj, &field_path) {
+                    lookups.push((rec_idx, None, uri.to_string()));
+                }
+                continue;
+            }
+            _ => continue,
+        };
+
+        for (nested_idx, nested) in nested_array.iter().enumerate() {
+            if let Some(uri) = get_nested_str(nested, &field_path) {
+                lookups.push((rec_idx, Some(nested_idx), uri.to_string()));
+            }
+        }
+    }
+
+    // Batch fetch all target URIs in parallel
+    let fetched: HashMap<String, serde_json::Value> = lookups
+        .iter()
+        .map(|(_, _, uri)| uri.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .par_bridge()
+        .filter_map(|uri| {
+            store.get_by_uri_string(&uri).ok().flatten().map(|record| {
+                let did = extract_did_from_uri(&uri).unwrap_or_default();
+                let mut json = build_record_json(
+                    &record.uri,
+                    &record.cid,
+                    record.value,
+                    record.indexed_at,
+                    app,
+                );
+
+                // Transform blobs for this nested record
+                let blob_prefix = format!("{}.{}.", parent_key, child_key);
+                for (path, preset) in blobs {
+                    if let Some(sub_path) = path.strip_prefix(&blob_prefix) {
+                        // Normalize path and ensure value. prefix
+                        let normalized = normalize_nested_path(sub_path, hydration_keys);
+                        let with_value = if normalized.starts_with("value.") {
+                            normalized
+                        } else {
+                            format!("value.{}", normalized)
+                        };
+                        transform_blob_at_path(&mut json, &with_value, &did, preset);
+                    }
+                }
+
+                (uri, json)
+            })
+        })
+        .collect();
+
+    // Attach fetched records to nested items
+    for (rec_idx, nested_idx, uri) in lookups {
+        if let Some(hydrated) = fetched.get(&uri) {
+            match nested_idx {
+                None => {
+                    // Single object case
+                    if let Some(parent) = records[rec_idx].get_mut(parent_key) {
+                        parent[child_key] = hydrated.clone();
+                    }
+                }
+                Some(idx) => {
+                    if let Some(serde_json::Value::Array(arr)) =
+                        records[rec_idx].get_mut(parent_key)
+                    {
+                        if let Some(nested) = arr.get_mut(idx) {
+                            nested[child_key] = hydrated.clone();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Apply reverse hydration to nested records (level 1)
+/// parent_key: "items", child_key: "comments", pattern: "at://*/collection/*?field=$.uri"
+fn hydrate_nested_reverse(
+    records: &mut [serde_json::Value],
+    parent_key: &str,
+    child_key: &str,
+    lookup: &ReverseLookup,
+    app: &AppState,
+) {
+    let store = &app.store;
+
+    // Collect all lookups: (record_idx, nested_idx (None=single object), match_value)
+    let mut lookups: Vec<(usize, Option<usize>, String)> = Vec::new();
+
+    let match_field_path = if lookup.match_field == "$.uri" {
+        "uri".to_string()
+    } else {
+        let raw = lookup
+            .match_field
+            .strip_prefix("$.")
+            .unwrap_or(&lookup.match_field);
+        if raw.starts_with("value.") {
+            raw.to_string()
+        } else {
+            format!("value.{}", raw)
+        }
+    };
+
+    for (rec_idx, record) in records.iter().enumerate() {
+        let nested_array = match record.get(parent_key) {
+            Some(serde_json::Value::Array(arr)) => arr,
+            Some(obj) if obj.is_object() => {
+                // Single object, treat as array of 1
+                let match_value = if match_field_path == "uri" {
+                    obj.get("uri").and_then(|v| v.as_str())
+                } else {
+                    get_nested_str(obj, &match_field_path)
+                };
+                if let Some(value) = match_value {
+                    lookups.push((rec_idx, None, value.to_string()));
+                }
+                continue;
+            }
+            _ => continue,
+        };
+
+        for (nested_idx, nested) in nested_array.iter().enumerate() {
+            let match_value = if match_field_path == "uri" {
+                nested.get("uri").and_then(|v| v.as_str())
+            } else {
+                get_nested_str(nested, &match_field_path)
+            };
+
+            if let Some(value) = match_value {
+                lookups.push((rec_idx, Some(nested_idx), value.to_string()));
+            }
+        }
+    }
+
+    let limit = lookup.limit.unwrap_or(10);
+
+    // Parallel lookup
+    let results: Vec<(usize, Option<usize>, Vec<serde_json::Value>)> = lookups
+        .par_iter()
+        .filter_map(|(rec_idx, nested_idx, value)| {
+            store
+                .get_by_field_value(&lookup.collection, &lookup.field, value, limit, None)
+                .ok()
+                .map(|related| {
+                    let json: Vec<serde_json::Value> = related
+                        .into_iter()
+                        .map(|r| build_record_json(&r.uri, &r.cid, r.value, r.indexed_at, app))
+                        .collect();
+                    (*rec_idx, *nested_idx, json)
+                })
+        })
+        .collect();
+
+    // Attach results
+    for (rec_idx, nested_idx, related) in results {
+        match nested_idx {
+            None => {
+                // Single object case
+                if let Some(parent) = records[rec_idx].get_mut(parent_key) {
+                    parent[child_key] = serde_json::Value::Array(related);
+                }
+            }
+            Some(idx) => {
+                if let Some(serde_json::Value::Array(arr)) = records[rec_idx].get_mut(parent_key) {
+                    if let Some(nested) = arr.get_mut(idx) {
+                        nested[child_key] = serde_json::Value::Array(related);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Hydrate records with related data
 /// Supports two pattern types:
 /// 1. Forward hydration: "at://$.did/collection/rkey" - fetch a specific record by DID
 /// 2. Reverse hydration: "at://*/collection/*?field=$.uri" - fetch records that reference this record
+/// Supports nested hydration with dot notation (e.g., "items.photo") up to 2 levels
+/// Returns an error message if hydration config is invalid
 fn hydrate_records(
     records: &mut [serde_json::Value],
     hydrate: &HashMap<String, String>,
     blobs: &HashMap<String, String>,
     app: &AppState,
-) {
+) -> Result<(), String> {
+    if hydrate.is_empty() {
+        return Ok(());
+    }
+
     let store = &app.store;
 
-    // Separate forward and reverse hydration patterns
+    // Validate and sort by depth
+    let sorted_keys = validate_and_sort_hydration_keys(hydrate)?;
+
+    // Collect all hydration keys for path normalization
+    let all_hydration_keys: Vec<&str> = sorted_keys.iter().map(|(k, _, _)| *k).collect();
+
+    // Process level 0 (top-level hydrations)
+    let level_0: Vec<_> = sorted_keys.iter().filter(|(_, _, d)| *d == 0).collect();
+
+    // Separate forward and reverse patterns for level 0
     let mut forward_patterns: Vec<(&str, &str, String, String)> = Vec::new();
     let mut reverse_patterns: Vec<(&str, ReverseLookup)> = Vec::new();
 
-    for (key, pattern) in hydrate {
+    for (key, pattern, _) in &level_0 {
         if pattern.contains('*') && pattern.contains('?') {
-            // Reverse lookup pattern
             if let Some(lookup) = parse_reverse_lookup(pattern) {
-                reverse_patterns.push((key.as_str(), lookup));
+                reverse_patterns.push((*key, lookup));
             }
         } else if let Some((collection, rkey)) = parse_hydration_pattern(pattern) {
-            // Forward hydration pattern
-            forward_patterns.push((key.as_str(), pattern.as_str(), collection, rkey));
+            forward_patterns.push((*key, *pattern, collection, rkey));
         }
     }
 
-    // Handle forward hydration (existing logic)
+    // Handle forward hydration (level 0)
     if !forward_patterns.is_empty() {
         // Collect all DIDs and their hydration targets using references
         let mut hydration_lookups: HashMap<String, Vec<(usize, &str)>> = HashMap::new();
@@ -293,11 +583,19 @@ fn hydrate_records(
                             app,
                         );
 
-                        // Transform blobs in hydrated record
+                        // Transform blobs in hydrated record (level 0 only)
                         let did = extract_did_from_uri(target_uri).unwrap_or_default();
                         for (path, preset) in blobs {
                             for (key, _, _, _) in &forward_patterns {
                                 if let Some(sub_path) = path.strip_prefix(&format!("{}.", key)) {
+                                    // Skip if this is a nested blob path (has another dot after key)
+                                    if sub_path.contains('.') {
+                                        // Check if it's a nested hydration blob path
+                                        let first_part = sub_path.split('.').next().unwrap_or("");
+                                        if all_hydration_keys.contains(&first_part) {
+                                            continue; // Skip, will be handled by nested hydration
+                                        }
+                                    }
                                     // Normalize: add value. prefix if not already present
                                     let normalized = if sub_path.starts_with("value.") {
                                         sub_path.to_string()
@@ -331,7 +629,7 @@ fn hydrate_records(
         }
     }
 
-    // Handle reverse hydration (parallel)
+    // Handle reverse hydration (level 0, parallel)
     if !reverse_patterns.is_empty() {
         // Collect all lookups: (record_index, key, collection, field, match_value, limit)
         let mut reverse_lookups: Vec<(usize, &str, String, String, String, usize)> = Vec::new();
@@ -382,6 +680,35 @@ fn hydrate_records(
             }
         }
     }
+
+    // Process level 1 (nested hydrations)
+    let level_1: Vec<_> = sorted_keys.iter().filter(|(_, _, d)| *d == 1).collect();
+
+    for (key, pattern, _) in level_1 {
+        let parts: Vec<&str> = key.split('.').collect();
+        let parent_key = parts[0];
+        let child_key = parts[1];
+
+        if pattern.contains('*') && pattern.contains('?') {
+            // Nested reverse hydration
+            if let Some(lookup) = parse_reverse_lookup(pattern) {
+                hydrate_nested_reverse(records, parent_key, child_key, &lookup, app);
+            }
+        } else {
+            // Nested forward hydration
+            hydrate_nested_forward(
+                records,
+                parent_key,
+                child_key,
+                pattern,
+                blobs,
+                &all_hydration_keys,
+                app,
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[derive(Deserialize)]
@@ -401,9 +728,11 @@ pub struct QueryRequest {
     #[serde(default)]
     blobs: HashMap<String, String>, // path -> preset (avatar, banner, feed_thumbnail)
     #[serde(default)]
-    include_count: bool,
-    #[serde(flatten)]
-    search_fields: HashMap<String, serde_json::Value>, // Captures search.* fields
+    count: HashMap<String, String>, // key -> "at://*/collection/*?field=$.uri" for counts
+    #[serde(default)]
+    search: HashMap<String, String>, // field -> search term
+    #[serde(default)]
+    include_total: bool,
 }
 
 #[derive(Serialize)]
@@ -652,19 +981,6 @@ async fn stats(State((app, _)): State<AppStateHandle>) -> Result<Json<StatsRespo
     }))
 }
 
-/// Extract search.* fields from the flattened map
-fn extract_search_fields(fields: &HashMap<String, serde_json::Value>) -> HashMap<String, String> {
-    fields
-        .iter()
-        .filter_map(|(k, v)| {
-            k.strip_prefix("search.").and_then(|field| {
-                v.as_str()
-                    .map(|query| (field.to_string(), query.to_string()))
-            })
-        })
-        .collect()
-}
-
 /// Reverse lookup configuration parsed from a pattern
 #[derive(Debug, Clone)]
 struct ReverseLookup {
@@ -723,19 +1039,6 @@ fn parse_reverse_lookup(pattern: &str) -> Option<ReverseLookup> {
         match_field: match_field?,
         limit,
     })
-}
-
-/// Extract count.* fields from the flattened map
-fn extract_count_fields(fields: &HashMap<String, serde_json::Value>) -> HashMap<String, String> {
-    fields
-        .iter()
-        .filter_map(|(k, v)| {
-            k.strip_prefix("count.").and_then(|field| {
-                v.as_str()
-                    .map(|pattern| (field.to_string(), pattern.to_string()))
-            })
-        })
-        .collect()
 }
 
 /// Get a nested string value from a JSON object using dot notation
@@ -878,29 +1181,9 @@ async fn query_handler(
         .min(MAX_QUERY_LIMIT);
     let config = app.config();
 
-    // Extract search fields from JSON body
-    let mut search_fields = extract_search_fields(&payload.search_fields);
-
-    // Merge search fields from URI params (JSON takes precedence)
-    for (key, value) in &uri_params {
-        if let Some(field) = key.strip_prefix("search.") {
-            search_fields
-                .entry(field.to_string())
-                .or_insert_with(|| value.clone());
-        }
-    }
-
-    // Extract count.* fields for reverse lookups
-    let mut count_fields = extract_count_fields(&payload.search_fields);
-
-    // Merge count fields from URI params
-    for (key, value) in &uri_params {
-        if let Some(field) = key.strip_prefix("count.") {
-            count_fields
-                .entry(field.to_string())
-                .or_insert_with(|| value.clone());
-        }
-    }
+    // Use search and count directly from payload
+    let search_fields = &payload.search;
+    let count_fields = &payload.count;
 
     // If search fields present, use Tantivy search
     if !search_fields.is_empty() {
@@ -943,7 +1226,7 @@ async fn query_handler(
                     payload.cursor.as_deref(),
                     &hydrate,
                     &payload.blobs,
-                    payload.include_count,
+                    payload.include_total,
                     &count_fields,
                 )
                 .await;
@@ -1030,14 +1313,16 @@ async fn query_handler(
 
         // Apply hydration if requested
         if !hydrate.is_empty() || !payload.blobs.is_empty() {
-            hydrate_records(&mut values, &hydrate, &payload.blobs, &app);
+            hydrate_records(&mut values, &hydrate, &payload.blobs, &app).map_err(|e| {
+                (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e }))
+            })?;
         }
 
         // Execute count.* reverse lookups
         execute_count_lookups(&mut values, &count_fields, &app);
 
         // Get count if requested
-        let total = if payload.include_count {
+        let total = if payload.include_total {
             app.store.count_collection(collection).ok()
         } else {
             None
@@ -1058,7 +1343,7 @@ async fn query_handler(
         payload.cursor.as_deref(),
         &hydrate,
         &payload.blobs,
-        payload.include_count,
+        payload.include_total,
         &count_fields,
     )
     .await
@@ -1072,7 +1357,7 @@ async fn execute_unsorted_query(
     cursor: Option<&str>,
     hydrate: &HashMap<String, String>,
     blobs: &HashMap<String, String>,
-    include_count: bool,
+    include_total: bool,
     count_fields: &HashMap<String, String>,
 ) -> Result<Json<QueryResponse>, (StatusCode, Json<ErrorResponse>)> {
     let records = query::execute_paginated(parsed, &app.store, cursor, limit + 1).map_err(|e| {
@@ -1100,14 +1385,16 @@ async fn execute_unsorted_query(
 
     // Apply hydration if requested
     if !hydrate.is_empty() || !blobs.is_empty() {
-        hydrate_records(&mut values, hydrate, blobs, app);
+        hydrate_records(&mut values, hydrate, blobs, app).map_err(|e| {
+            (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e }))
+        })?;
     }
 
     // Execute count.* reverse lookups
     execute_count_lookups(&mut values, count_fields, app);
 
     // Get count if requested
-    let total = if include_count {
+    let total = if include_total {
         match parsed {
             Query::AllCollection { collection } => {
                 app.store.count_collection(collection.as_str()).ok()
@@ -1286,7 +1573,9 @@ async fn execute_search_query(
 
     // Apply hydration if requested (also handles multi-segment blob paths)
     if !hydrate.is_empty() || !blobs.is_empty() {
-        hydrate_records(&mut records, hydrate, blobs, app);
+        hydrate_records(&mut records, hydrate, blobs, app).map_err(|e| {
+            (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: e }))
+        })?;
     }
 
     // Execute count.* reverse lookups
@@ -2000,4 +2289,87 @@ pub async fn run(app: Arc<AppState>, port: u16, relay: Option<String>) {
         std::thread::sleep(Duration::from_secs(2));
         std::process::exit(0);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_normalize_nested_path() {
+        let keys = vec!["author", "items", "photo"];
+
+        // Hydration patterns
+        assert_eq!(normalize_nested_path("$.item", &keys), "$.value.item");
+        assert_eq!(
+            normalize_nested_path("$.value.item", &keys),
+            "$.value.item"
+        );
+        assert_eq!(normalize_nested_path("$.uri", &keys), "$.uri");
+
+        // Blob paths
+        assert_eq!(
+            normalize_nested_path("author.avatar", &keys),
+            "author.value.avatar"
+        );
+        assert_eq!(
+            normalize_nested_path("author.value.avatar", &keys),
+            "author.value.avatar"
+        );
+        assert_eq!(
+            normalize_nested_path("items.photo.photo", &keys),
+            "items.value.photo.value.photo"
+        );
+    }
+
+    #[test]
+    fn test_validate_hydration_keys_valid() {
+        let mut hydrate = HashMap::new();
+        hydrate.insert("author".to_string(), "at://$.did/col/rkey".to_string());
+        hydrate.insert(
+            "items".to_string(),
+            "at://*/col/*?field=$.uri".to_string(),
+        );
+        hydrate.insert("items.photo".to_string(), "at://$.item".to_string());
+
+        let result = validate_and_sort_hydration_keys(&hydrate);
+        assert!(result.is_ok());
+
+        let keys = result.unwrap();
+        // Should be sorted by depth: level 0 first, then level 1
+        assert_eq!(keys.len(), 3);
+        // Level 0 keys come first (order within level may vary)
+        assert!(keys[0].2 == 0 || keys[1].2 == 0);
+        // Level 1 key comes last
+        assert_eq!(keys[2].0, "items.photo");
+        assert_eq!(keys[2].2, 1);
+    }
+
+    #[test]
+    fn test_validate_hydration_keys_missing_parent() {
+        let mut hydrate = HashMap::new();
+        // Missing parent "items"
+        hydrate.insert("items.photo".to_string(), "at://$.item".to_string());
+
+        let result = validate_and_sort_hydration_keys(&hydrate);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("requires parent 'items' to be defined"));
+    }
+
+    #[test]
+    fn test_validate_hydration_keys_depth_exceeded() {
+        let mut hydrate = HashMap::new();
+        hydrate.insert("a".to_string(), "at://$.did/col/rkey".to_string());
+        hydrate.insert("a.b".to_string(), "at://$.item".to_string());
+        // Depth 2 (3 levels) - exceeds max
+        hydrate.insert("a.b.c".to_string(), "at://$.item".to_string());
+
+        let result = validate_and_sort_hydration_keys(&hydrate);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("exceeds max depth of 2 levels"));
+    }
 }

@@ -27,7 +27,7 @@ curl -X POST localhost:3000/query -H "Content-Type: application/json" \
   -d '{"q": "at://did:plc:xyz/fm.teal.alpha.feed.play"}'
 ```
 
-See [examples/fm-teal](examples/fm-teal) for a full demo UI, or [examples/app-bsky](examples/app-bsky) for a Bluesky timeline with like/repost counts.
+See [examples/fm-teal](examples/fm-teal) for a full demo UI, [examples/app-bsky](examples/app-bsky) for a Bluesky timeline with like/repost counts, or [examples/social-grain](examples/social-grain) for nested hydration with photo galleries.
 
 ## Configuration
 
@@ -115,13 +115,15 @@ Queries use AT-URI patterns:
 | Field | Description |
 |-------|-------------|
 | `q` | The AT-URI query pattern |
+| `collection` | Shorthand for `q: "at://*/collection/*"` |
 | `limit` | Max records to return (default 100, max 1000) |
 | `cursor` | Pagination cursor from previous response |
 | `sort` | Field to sort by (requires index) |
-| `search.<field>` | Fuzzy text search on field (requires search field config) |
-| `hydrate.<key>` | Attach related record at `<key>` (see Hydration below) |
-| `count.<key>` | Count records matching reverse lookup pattern (see Reverse Lookups below) |
-| `blobs.<path>` | Transform blob ref to CDN URL (presets: `avatar`, `banner`, `feed_thumbnail`) |
+| `search` | Object mapping fields to search terms (requires search field config) |
+| `hydrate` | Object mapping keys to hydration patterns (see Hydration below) |
+| `count` | Object mapping keys to reverse lookup patterns (see Reverse Lookups below) |
+| `blobs` | Object mapping paths to CDN presets (`avatar`, `banner`, `feed_thumbnail`) |
+| `include_total` | If true, response includes `total` count of matching records |
 
 ```bash
 # Paginated, sorted by playedAt
@@ -130,11 +132,18 @@ curl -X POST localhost:3000/query -H "Content-Type: application/json" \
 
 # Search for tracks by name (field must be configured in ATPDB_SEARCH_FIELDS)
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
-  -d '{"q": "at://*/fm.teal.alpha.feed.play", "search.track.name": "midnight"}'
+  -d '{
+    "q": "at://*/fm.teal.alpha.feed.play",
+    "search": {"track.name": "midnight"}
+  }'
 
 # Hydrate with user's profile and transform avatar blob
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
-  -d '{"q": "at://*/fm.teal.alpha.feed.play", "hydrate.author": "at://$.did/app.bsky.actor.profile/self", "blobs.author.avatar": "avatar"}'
+  -d '{
+    "q": "at://*/fm.teal.alpha.feed.play",
+    "hydrate": {"author": "at://$.did/app.bsky.actor.profile/self"},
+    "blobs": {"author.avatar": "avatar"}
+  }'
 ```
 
 ### Hydration Patterns
@@ -146,7 +155,34 @@ Hydration attaches related records to each result:
 | `at://$.did/collection/rkey` | Forward lookup: fetch record by DID from result |
 | `at://*/collection/*?field=$.uri` | Reverse lookup: fetch records that reference the result |
 
-### Reverse Lookups (count.* and reverse hydrate.*)
+### Nested Hydration
+
+Hydrate records within hydrated records using dot notation (max 2 levels):
+
+```bash
+# Gallery with items, and each item's photo hydrated
+curl -X POST localhost:3000/query -H "Content-Type: application/json" \
+  -d '{
+    "collection": "social.grain.gallery",
+    "hydrate": {
+      "author": "at://$.did/social.grain.actor.profile/self",
+      "items": "at://*/social.grain.gallery.item/*?gallery=$.uri&limit=10",
+      "items.photo": "at://$.item"
+    },
+    "blobs": {
+      "author.avatar": "avatar",
+      "items.photo.photo": "feed_thumbnail"
+    }
+  }'
+```
+
+- `items` - Level 0: fetches gallery items via reverse lookup
+- `items.photo` - Level 1: for each item, fetches the photo record referenced by `$.item`
+- Blob paths like `items.photo.photo` transform blobs in nested records
+
+See [examples/social-grain](examples/social-grain) for a complete nested hydration demo.
+
+### Reverse Lookups (count and reverse hydrate)
 
 Count or fetch records that reference a field (e.g., likes on posts). Requires an `at-uri` index on the referencing field.
 
@@ -158,14 +194,14 @@ ATPDB_INDEXES="app.bsky.feed.like:subject.uri:at-uri" atpdb serve
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
   -d '{
     "q": "at://*/app.bsky.feed.post/*",
-    "count.likes": "at://*/app.bsky.feed.like/*?subject.uri=$.uri"
+    "count": {"likes": "at://*/app.bsky.feed.like/*?subject.uri=$.uri"}
   }'
 
 # Fetch the actual like records (reverse hydration)
 curl -X POST localhost:3000/query -H "Content-Type: application/json" \
   -d '{
     "q": "at://*/app.bsky.feed.post/*",
-    "hydrate.likers": "at://*/app.bsky.feed.like/*?subject.uri=$.uri&limit=10"
+    "hydrate": {"likers": "at://*/app.bsky.feed.like/*?subject.uri=$.uri&limit=10"}
   }'
 ```
 

@@ -448,7 +448,7 @@
                     blobs: {
                         'author.avatar': 'avatar'
                     },
-                    include_count: isFirstPage
+                    include_total: isFirstPage
                 };
                 if (currentCursor) {
                     body.cursor = currentCursor;
@@ -461,7 +461,7 @@
                         sort: body.sort,
                         'hydrate.author': body.hydrate.author,
                         'blobs.author.avatar': body.blobs['author.avatar'],
-                        include_count: body.include_count
+                        include_total: body.include_total
                     });
                 }
 
@@ -571,7 +571,7 @@
             try {
                 const body = {
                     q: baseUri,
-                    [`search.${fieldName}`]: query,
+                    search: {[fieldName]: query},
                     limit: 50,
                     hydrate: {
                         author: 'at://$.did/app.bsky.actor.profile/self'
