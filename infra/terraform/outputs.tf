@@ -13,7 +13,7 @@ output "server_name" {
   value       = hcloud_server.main.name
 }
 
-output "data_volume_id" {
-  description = "ID of the data volume"
-  value       = hcloud_volume.data.id
-}
+# output "data_volume_id" {
+#   description = "ID of the data volume"
+#   value       = hcloud_volume.data.id
+# }

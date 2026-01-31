@@ -121,23 +121,7 @@ runcmd:
   - ufw allow from 172.16.0.0/12 to any port 3000
   - ufw --force enable
 
-  # Create data directory and mount volume
-  - mkdir -p /data/atpdb
-  - |
-    # Wait for volume to be attached
-    for i in $(seq 1 30); do
-      if [ -e /dev/disk/by-id/scsi-0HC_Volume_* ]; then
-        break
-      fi
-      sleep 2
-    done
-  - |
-    # Mount data volume
-    DATA_DISK=$(ls -1 /dev/disk/by-id/scsi-0HC_Volume_* 2>/dev/null | head -1)
-    if [ -n "$DATA_DISK" ]; then
-      mount $DATA_DISK /data
-      echo "$DATA_DISK /data ext4 defaults 0 2" >> /etc/fstab
-    fi
+  # Create data directory on local disk (no volume)
   - mkdir -p /data/atpdb
   - chown -R deploy:deploy /data
 

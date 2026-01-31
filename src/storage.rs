@@ -499,18 +499,23 @@ impl Store {
                 .or_insert(0) += 1;
         }
 
-        // Commit the batch
+        // Add counter updates to batch (avoids individual inserts that can poison on fsync)
+        {
+            let _guard = self.counter_lock.lock();
+            for (collection, count) in &collection_counts {
+                let key = Self::count_key(collection);
+                let current = self.get_count_raw(&key)?;
+                batch.insert(&self.records, &key, (current + *count as u64).to_le_bytes());
+            }
+            for ((collection, field, value), count) in &reverse_counts {
+                let key = Self::reverse_count_key(collection, field, value);
+                let current = self.get_count_raw(&key)?;
+                batch.insert(&self.records, &key, (current + *count as u64).to_le_bytes());
+            }
+        }
+
+        // Commit the batch atomically (no fsync by default, so no poison risk)
         batch.commit()?;
-
-        // Update collection counts (after batch commit)
-        for (collection, count) in &collection_counts {
-            self.increment_count_by(collection, *count)?;
-        }
-
-        // Update reverse lookup counts (after batch commit)
-        for ((collection, field, value), count) in &reverse_counts {
-            self.increment_reverse_count_by(collection, field, value, *count)?;
-        }
 
         let count = records.len();
         histogram!("storage_operation_seconds", "op" => "put_batch")
@@ -785,32 +790,6 @@ impl Store {
         let key = Self::reverse_count_key(collection, field, field_value);
         let current = self.get_count_raw(&key)?;
         self.records.insert(&key, (current + 1).to_le_bytes())?;
-        Ok(())
-    }
-
-    /// Increment collection counter by amount (atomic via lock)
-    fn increment_count_by(&self, collection: &str, amount: usize) -> Result<(), StorageError> {
-        let _guard = self.counter_lock.lock();
-        let key = Self::count_key(collection);
-        let current = self.get_count_raw(&key)?;
-        self.records
-            .insert(&key, (current + amount as u64).to_le_bytes())?;
-        Ok(())
-    }
-
-    /// Increment reverse lookup counter by amount (atomic via lock)
-    fn increment_reverse_count_by(
-        &self,
-        collection: &str,
-        field: &str,
-        field_value: &str,
-        amount: usize,
-    ) -> Result<(), StorageError> {
-        let _guard = self.counter_lock.lock();
-        let key = Self::reverse_count_key(collection, field, field_value);
-        let current = self.get_count_raw(&key)?;
-        self.records
-            .insert(&key, (current + amount as u64).to_le_bytes())?;
         Ok(())
     }
 
