@@ -32,17 +32,19 @@ See [examples/fm-teal](examples/fm-teal) for a full demo UI, [examples/app-bsky]
 
 ## Configuration
 
-Configure via environment variables or the REPL.
+Configure via environment variables:
 
-### Collections
-
-Only store records from collections you specify:
-
-```bash
-ATPDB_COLLECTIONS="fm.teal.alpha.feed.play,app.bsky.feed.post" atpdb serve
-```
-
-Supports wildcards: `fm.teal.*` matches all `fm.teal.` prefixed collections.
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `ATPDB_MODE` | Sync mode: `manual`, `signal`, or `full-network` | `manual` |
+| `ATPDB_RELAY` | Relay WebSocket URL | `wss://bsky.network` |
+| `ATPDB_COLLECTIONS` | Comma-separated collections to index (supports wildcards like `fm.teal.*`) | — |
+| `ATPDB_SIGNAL_COLLECTION` | Collection that triggers repo discovery (for `signal` mode) | — |
+| `ATPDB_INDEXES` | Index definitions (see below) | — |
+| `ATPDB_SEARCH_FIELDS` | Fields to enable fuzzy search on | — |
+| `ATPDB_SYNC_PARALLELISM` | Concurrent repo syncs | `5` |
+| `ATPDB_CACHE_SIZE_MB` | Database block cache size in MB | `1024` |
+| `ATPDB_DATA_DIR` | Database storage location | `./atpdb.data` (`/app/data` in Docker) |
 
 ### Modes
 
@@ -52,16 +54,12 @@ Supports wildcards: `fm.teal.*` matches all `fm.teal.` prefixed collections.
 | `signal` | Auto-discover repos that have records in a signal collection |
 | `full-network` | Crawl all repos from the relay |
 
-```bash
-ATPDB_MODE=signal ATPDB_SIGNAL_COLLECTION=fm.teal.alpha.feed.play atpdb serve
-```
-
 ### Indexes
 
-Sort query results by a field:
+Define indexes with format `collection:field:type[:direction]`:
 
 ```bash
-ATPDB_INDEXES="fm.teal.alpha.feed.play:playedAt:datetime:desc" atpdb serve
+ATPDB_INDEXES="fm.teal.alpha.feed.play:playedAt:datetime:desc"
 ```
 
 Index types:
@@ -69,33 +67,13 @@ Index types:
 - `integer` - Numbers, supports sorted queries
 - `at-uri` - AT-URI strings, supports reverse lookups (count/hydrate by reference)
 
-### Search
+### Search Fields
 
-Enable fuzzy text search on specific fields:
-
-```bash
-ATPDB_SEARCH_FIELDS="fm.teal.alpha.feed.play:track.name" atpdb serve
-```
-
-### Sync Parallelism
-
-Control how many repos sync concurrently (default: 3):
+Enable fuzzy text search with format `collection:field`:
 
 ```bash
-ATPDB_SYNC_PARALLELISM=10 atpdb serve
+ATPDB_SEARCH_FIELDS="fm.teal.alpha.feed.play:track.name,app.bsky.feed.post:text"
 ```
-
-Higher values sync faster but use more CPU, memory, and bandwidth.
-
-### Cache Size
-
-Control the database block cache size in MB (default: 1024):
-
-```bash
-ATPDB_CACHE_SIZE_MB=2048 atpdb serve
-```
-
-Larger cache improves query performance. Recommended: 20-25% of available RAM, or more if your dataset fits in memory.
 
 ## Query Syntax
 

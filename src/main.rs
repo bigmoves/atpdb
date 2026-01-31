@@ -29,12 +29,18 @@ use repos::{RepoState, RepoStatus};
 use resync_buffer::{BufferedCommit, BufferedOperation};
 use rustyline::error::ReadlineError;
 use rustyline::DefaultEditor;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+/// Get data directory from ATPDB_DATA_DIR env var or use default
+fn get_data_dir() -> std::path::PathBuf {
+    std::env::var("ATPDB_DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("./atpdb.data"))
+}
 
 enum CommandResult {
     Continue,
@@ -1111,7 +1117,7 @@ fn main() {
             }
         }
 
-        let app = match AppState::open(Path::new("./atpdb.data")) {
+        let app = match AppState::open(&get_data_dir()) {
             Ok(a) => Arc::new(a),
             Err(e) => {
                 eprintln!("Failed to open storage: {}", e);
@@ -1126,7 +1132,7 @@ fn main() {
 
     // Non-interactive mode
     if args.len() > 1 {
-        let app = match AppState::open(Path::new("./atpdb.data")) {
+        let app = match AppState::open(&get_data_dir()) {
             Ok(a) => Arc::new(a),
             Err(e) => {
                 eprintln!("Failed to open storage: {}", e);
@@ -1141,7 +1147,7 @@ fn main() {
     }
 
     // Interactive mode
-    let app = match AppState::open(Path::new("./atpdb.data")) {
+    let app = match AppState::open(&get_data_dir()) {
         Ok(a) => Arc::new(a),
         Err(e) => {
             eprintln!("Failed to open storage: {}", e);
