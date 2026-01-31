@@ -239,7 +239,7 @@ async fn process_car(
     // Pass ownership of car_bytes to cursor - avoids holding duplicate data
     let cursor = Cursor::new(car_bytes);
     let driver = DriverBuilder::new()
-        .with_mem_limit_mb(100)
+        .with_mem_limit_mb(16)
         .load_car(cursor)
         .await
         .map_err(|e: repo_stream::drive::DriveError| SyncError::Car(e.to_string()))?;
