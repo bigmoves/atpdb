@@ -1,12 +1,14 @@
 use crate::app::AppState;
-use crate::config::{matches_any_filter, IndexDirection, Mode};
+use crate::config::{matches_any_filter, IndexConfig, IndexDirection, Mode, SearchFieldConfig};
 use crate::crawler::start_crawler;
 use crate::firehose::{Event, FirehoseClient, Operation};
 use crate::query::{self, Query};
 use crate::repos::{RepoState, RepoStatus};
-use crate::storage::{Record, ScanDirection};
+use crate::search::SearchIndex;
+use crate::storage::{Record, ScanDirection, Store};
 use crate::sync;
 use crate::sync_worker::{start_sync_worker, SyncHandle};
+use crate::types::AtUri;
 use axum::{
     extract::{Request, State},
     http::StatusCode,
@@ -1877,6 +1879,107 @@ async fn config_update(
     }))
 }
 
+/// Buffer for batching firehose writes to reduce fsync overhead
+const FIREHOSE_BATCH_SIZE: usize = 500;
+const FIREHOSE_FLUSH_INTERVAL_MS: u64 = 100;
+const FIREHOSE_MAX_RETRIES: u32 = 3;
+
+struct FirehoseWriteBuffer {
+    records: Vec<(AtUri, Record)>,
+    last_flush: Instant,
+}
+
+impl FirehoseWriteBuffer {
+    fn new() -> Self {
+        Self {
+            records: Vec::with_capacity(FIREHOSE_BATCH_SIZE),
+            last_flush: Instant::now(),
+        }
+    }
+
+    fn push(&mut self, uri: AtUri, record: Record) {
+        self.records.push((uri, record));
+    }
+
+    fn should_flush(&self) -> bool {
+        self.records.len() >= FIREHOSE_BATCH_SIZE
+            || (self.last_flush.elapsed().as_millis() as u64 >= FIREHOSE_FLUSH_INTERVAL_MS
+                && !self.records.is_empty())
+    }
+
+    fn flush(
+        &mut self,
+        store: &Store,
+        indexes: &[IndexConfig],
+        search: Option<&SearchIndex>,
+        search_fields: &[SearchFieldConfig],
+    ) {
+        if self.records.is_empty() {
+            return;
+        }
+
+        let start = Instant::now();
+        let count = self.records.len();
+
+        // Batch write to storage with retry
+        let mut success = false;
+        for attempt in 0..FIREHOSE_MAX_RETRIES {
+            match store.put_batch_with_indexes(&self.records, indexes) {
+                Ok(_) => {
+                    counter!("firehose_operations_total", "op" => "batch_write")
+                        .increment(count as u64);
+                    success = true;
+                    break;
+                }
+                Err(e) => {
+                    counter!("firehose_operations_total", "op" => "batch_retry").increment(1);
+                    if attempt == FIREHOSE_MAX_RETRIES - 1 {
+                        // Final attempt failed - log and drop records
+                        tracing::error!(
+                            error = %e,
+                            records = count,
+                            "Firehose batch write failed after {} retries, dropping records",
+                            FIREHOSE_MAX_RETRIES
+                        );
+                        counter!("firehose_operations_total", "op" => "batch_dropped")
+                            .increment(count as u64);
+                    } else {
+                        tracing::warn!(
+                            error = %e,
+                            attempt = attempt + 1,
+                            "Firehose batch write failed, retrying"
+                        );
+                        // Brief pause before retry
+                        std::thread::sleep(Duration::from_millis(10 * (attempt as u64 + 1)));
+                    }
+                }
+            }
+        }
+
+        // Only index for search if storage write succeeded
+        if success {
+            if let Some(search) = search {
+                for (uri, record) in &self.records {
+                    if let Err(e) = search.index_record(
+                        &uri.to_string(),
+                        uri.collection.as_str(),
+                        &record.value,
+                        search_fields,
+                    ) {
+                        tracing::error!(error = %e, "Search index error");
+                    }
+                }
+            }
+        }
+
+        histogram!("firehose_batch_write_seconds").record(start.elapsed().as_secs_f64());
+        histogram!("firehose_batch_size").record(count as f64);
+
+        self.records.clear();
+        self.last_flush = Instant::now();
+    }
+}
+
 fn start_firehose(
     relay: String,
     app: Arc<AppState>,
@@ -1900,8 +2003,22 @@ fn start_firehose(
                     println!("Connected to firehose: {}", relay);
                     let mut event_count: u64 = 0;
                     let mut last_seq: i64 = cursor.unwrap_or(0);
+                    let mut write_buffer = FirehoseWriteBuffer::new();
 
                     while running.load(Ordering::Relaxed) {
+                        // Cache config once per loop iteration
+                        let config = app.config();
+
+                        // Flush buffer if needed (time-based)
+                        if write_buffer.should_flush() {
+                            write_buffer.flush(
+                                &app.store,
+                                &config.indexes,
+                                app.search.as_ref(),
+                                &config.search_fields,
+                            );
+                        }
+
                         match client.next_event() {
                             Ok(Some(Event::Commit {
                                 seq,
@@ -1917,7 +2034,6 @@ fn start_firehose(
                                 if event_count.is_multiple_of(1000) {
                                     let _ = app.set_firehose_cursor(&relay, seq);
                                 }
-                                let config = app.config();
 
                                 // Check if we should process this repo based on mode
                                 let should_process = match config.mode {
@@ -2014,23 +2130,19 @@ fn start_firehose(
                                                     .unwrap()
                                                     .as_secs(),
                                             };
-                                            if let Err(e) = app.store.put_with_indexes(
-                                                &uri,
-                                                &record,
-                                                &config.indexes,
-                                            ) {
-                                                tracing::error!(error = %e, "Storage error");
-                                            }
-                                            // Index for search
-                                            if let Some(ref search) = app.search {
-                                                if let Err(e) = search.index_record(
-                                                    &uri.to_string(),
-                                                    uri.collection.as_str(),
-                                                    &record.value,
+                                            // Add to write buffer instead of immediate write
+                                            write_buffer.push(uri, record);
+                                            counter!("firehose_operations_total", "op" => "create")
+                                                .increment(1);
+
+                                            // Flush if buffer is full
+                                            if write_buffer.should_flush() {
+                                                write_buffer.flush(
+                                                    &app.store,
+                                                    &config.indexes,
+                                                    app.search.as_ref(),
                                                     &config.search_fields,
-                                                ) {
-                                                    tracing::error!(error = %e, "Search index error");
-                                                }
+                                                );
                                             }
                                         }
                                         Operation::Update { uri, cid, value } => {
@@ -2051,23 +2163,19 @@ fn start_firehose(
                                                     .unwrap()
                                                     .as_secs(),
                                             };
-                                            if let Err(e) = app.store.put_with_indexes(
-                                                &uri,
-                                                &record,
-                                                &config.indexes,
-                                            ) {
-                                                tracing::error!(error = %e, "Storage error");
-                                            }
-                                            // Index for search
-                                            if let Some(ref search) = app.search {
-                                                if let Err(e) = search.index_record(
-                                                    &uri.to_string(),
-                                                    uri.collection.as_str(),
-                                                    &record.value,
+                                            // Add to write buffer instead of immediate write
+                                            write_buffer.push(uri, record);
+                                            counter!("firehose_operations_total", "op" => "update")
+                                                .increment(1);
+
+                                            // Flush if buffer is full
+                                            if write_buffer.should_flush() {
+                                                write_buffer.flush(
+                                                    &app.store,
+                                                    &config.indexes,
+                                                    app.search.as_ref(),
                                                     &config.search_fields,
-                                                ) {
-                                                    tracing::error!(error = %e, "Search index error");
-                                                }
+                                                );
                                             }
                                         }
                                         Operation::Delete { uri } => {
@@ -2126,6 +2234,17 @@ fn start_firehose(
 
                         // Reset reconnect delay on successful message processing
                         reconnect_delay = Duration::from_secs(1);
+                    }
+
+                    // Flush any remaining buffered writes before disconnect
+                    {
+                        let config = app.config();
+                        write_buffer.flush(
+                            &app.store,
+                            &config.indexes,
+                            app.search.as_ref(),
+                            &config.search_fields,
+                        );
                     }
 
                     // Save final cursor on disconnect
